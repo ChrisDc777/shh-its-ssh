@@ -23,20 +23,28 @@ const (
     port = 23234
 )
 
-// ── Styles ────────────────────────────────────────────────────────────────────
 var (
-    bg        = lipgloss.Color("#1e2430")
     cyan      = lipgloss.Color("#4ec9b0")
     white     = lipgloss.Color("#d4d4d4")
     dimmed    = lipgloss.Color("#6a737d")
-
-    nameStyle = lipgloss.NewStyle().Foreground(cyan).Bold(true)
-    titleStyle = lipgloss.NewStyle().Foreground(cyan).Underline(true)
-    bodyStyle  = lipgloss.NewStyle().Foreground(white)
-    dimStyle   = lipgloss.NewStyle().Foreground(dimmed)
-    hintStyle  = lipgloss.NewStyle().Foreground(dimmed)
-    selectedStyle = lipgloss.NewStyle().Foreground(cyan).SetString("✦ ")
 )
+
+
+type styles struct {
+	name, title, body, dim, hint, selected lipgloss.Style
+}
+
+func makeStyles(r *lipgloss.Renderer) styles {
+	return styles{
+		name:     r.NewStyle().Foreground(cyan).Bold(true),
+		title:    r.NewStyle().Foreground(cyan).Underline(true),
+		body:     r.NewStyle().Foreground(white),
+		dim:      r.NewStyle().Foreground(dimmed),
+		hint:     r.NewStyle().Foreground(dimmed),
+		selected: r.NewStyle().Foreground(cyan).SetString("✦ "),
+	}
+}
+
 
 // ── ASCII art ─────────────────────────────────────────────────────────────────
 // Paste your ASCII name art here (generated from https://patorjk.com/software/taag/)
@@ -99,7 +107,9 @@ type model struct {
     articleOpen *article
     width, height int
     frame       int
+    styles      styles
 }
+
 
 var articles = []article{
     {
@@ -268,7 +278,7 @@ func (m model) renderAnimatedName() string {
 
              if !isName {
                  char := sparkles[(i+t)%len(sparkles)]
-                 grid[y][x] = lipgloss.NewStyle().Foreground(white).Render(char)
+                 grid[y][x] = m.styles.body.Foreground(white).Render(char)
              }
         }
     }
@@ -277,8 +287,9 @@ func (m model) renderAnimatedName() string {
     for y, line := range lines {
         for x, char := range line {
             if char != ' ' {
-                grid[y+marginY][x+marginX] = nameStyle.Render(string(char))
+                grid[y+marginY][x+marginX] = m.styles.name.Render(string(char))
             }
+
         }
     }
 
@@ -320,78 +331,79 @@ func (m model) wrapText(text string, width int) string {
 }
 
 func (m model) viewHome() string {
-    left := bodyStyle.Render(asciiPortrait)
+    left := m.styles.body.Render(asciiPortrait)
 
     // Limit width of bio text to avoid stretching
     maxWidth := 55
     
     name  := m.renderAnimatedName()
-    bio1 := bodyStyle.Render(m.wrapText("is a software engineer building intelligent systems on the internet, developing scalable products and experimenting with AI.", maxWidth))
-    bio2 := bodyStyle.Render("\n" + m.wrapText("He works across full-stack and backend systems, building APIs, cloud applications, and AI-powered tools.", maxWidth))
-    bio3 := dimStyle.Render(m.wrapText("Previously, he studied Computer Science Engineering at Symbiosis Institute of Technology, where he built projects in machine learning, computer vision, and AI-driven data systems.", maxWidth))
-    bio4 := dimStyle.Render("\n" + m.wrapText("His work sits at the intersection of software engineering, artificial intelligence, and real-world problem solving.", maxWidth))
-    bio5 := dimStyle.Render("Explore the directories below ↓")
+    bio1 := m.styles.body.Render(m.wrapText("is a software engineer building intelligent systems on the internet, developing scalable products and experimenting with AI.", maxWidth))
+    bio2 := m.styles.body.Render("\n" + m.wrapText("He works across full-stack and backend systems, building APIs, cloud applications, and AI-powered tools.", maxWidth))
+    bio3 := m.styles.dim.Render(m.wrapText("Previously, he studied Computer Science Engineering at Symbiosis Institute of Technology, where he built projects in machine learning, computer vision, and AI-driven data systems.", maxWidth))
+    bio4 := m.styles.dim.Render("\n" + m.wrapText("His work sits at the intersection of software engineering, artificial intelligence, and real-world problem solving.", maxWidth))
+    bio5 := m.styles.dim.Render("Explore the directories below ↓")
 
     navItems := []string{"Creations(soon)", "Reflections", "Contacts"}
     nav := ""
     for i, item := range navItems {
         if i == m.navIndex {
-            nav += selectedStyle.String() + nameStyle.Render(item) + "   "
+            nav += m.styles.selected.String() + m.styles.name.Render(item) + "   "
         } else {
-            nav += "  " + bodyStyle.Render(item) + "   "
+            nav += "  " + m.styles.body.Render(item) + "   "
         }
     }
 
     right := lipgloss.JoinVertical(lipgloss.Left, name, bio1, bio2, bio3, bio4, bio5, "\n"+nav)
     content := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
-    hint := hintStyle.Render("\n[← → to select · enter to open · q to quit]")
+    hint := m.styles.hint.Render("\n[← → to select · enter to open · q to quit]")
     return lipgloss.JoinVertical(lipgloss.Left, "\n"+content, hint)
 }
 
 func (m model) viewReflections() string {
-    out := titleStyle.Render("Reflections") + "\n" + dimStyle.Render("──────────────") + "\n\n"
-    out += dimStyle.Render("technology") + "\n"
+    out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+    out += m.styles.dim.Render("technology") + "\n"
     for i, a := range articles {
         prefix := "    "
-        title  := bodyStyle.Render(a.title)
+        title  := m.styles.body.Render(a.title)
         if i == m.reflIndex {
-            prefix = selectedStyle.String()
-            title  = nameStyle.Render(a.title)
+            prefix = m.styles.selected.String()
+            title  = m.styles.name.Render(a.title)
         }
         out += prefix + title + "\n"
     }
-    out += "\n" + hintStyle.Render("[↑ ↓ to select · enter to open · esc back]")
+    out += "\n" + m.styles.hint.Render("[↑ ↓ to select · enter to open · esc back]")
     return "\n" + out
 }
 
 func (m model) viewContacts() string {
-    out := titleStyle.Render("Contacts") + "\n" + dimStyle.Render("──────────────") + "\n\n"
+    out := m.styles.title.Render("Contacts") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
     contacts := []struct{label, display, url string}{
         {"IG ", "instagram.com/chrisdcosta777", "https://instagram.com/chrisdcosta777"},
         {"LI ", "linkedin.com/in/chrisdcosta777", "https://linkedin.com/in/chrisdcosta777"},
         {"GH ", "github.com/ChrisDc777", "https://github.com/ChrisDc777"},
     }
     for _, c := range contacts {
-        clickableLink := m.renderLink(bodyStyle.Render(c.display), c.url)
-        out += nameStyle.Render(c.label) + "  " + clickableLink + "\n\n"
+        clickableLink := m.renderLink(m.styles.body.Render(c.display), c.url)
+        out += m.styles.name.Render(c.label) + "  " + clickableLink + "\n\n"
     }
-    out += hintStyle.Render("[esc] back")
+    out += m.styles.hint.Render("[esc] back")
     return "\n" + out
 }
 
 func (m model) viewArticle() string {
     if m.articleOpen == nil { return "" }
     a := m.articleOpen
-    out := titleStyle.Render("Reflections") + "\n" + dimStyle.Render("──────────────") + "\n\n"
-    out += bodyStyle.Bold(true).Render(a.title) + "\n\n"
-    out += bodyStyle.Render(a.summary) + "\n\n"
+    out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+    out += m.styles.body.Bold(true).Render(a.title) + "\n\n"
+    out += m.styles.body.Render(a.summary) + "\n\n"
     if a.link != "" {
-        clickableLink := m.renderLink(bodyStyle.Render(a.link), a.link)
-        out += nameStyle.Render("Read → ") + clickableLink + "\n\n"
+        clickableLink := m.renderLink(m.styles.body.Render(a.link), a.link)
+        out += m.styles.name.Render("Read → ") + clickableLink + "\n\n"
     }
-    out += hintStyle.Render("[esc] back")
+    out += m.styles.hint.Render("[esc] back")
     return "\n" + out
 }
+
 
 // ── SSH Server ────────────────────────────────────────────────────────────────
 func main() {
@@ -413,11 +425,13 @@ func main() {
 				pty, _, _ := s.Pty()
 				m := initialModel()
 				m.width, m.height = pty.Window.Width, pty.Window.Height
+				m.styles = makeStyles(lipgloss.NewRenderer(s))
 				return m, []tea.ProgramOption{tea.WithAltScreen()}
 			}),
 			lm.Middleware(),
 		),
 	)
+
 	if err != nil {
 		panic(err)
 	}

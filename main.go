@@ -16,7 +16,10 @@ import (
 	"github.com/charmbracelet/wish"
 	bm "github.com/charmbracelet/wish/bubbletea"
 	lm "github.com/charmbracelet/wish/logging"
+	"github.com/muesli/termenv"
 )
+
+
 
 const (
     host = "0.0.0.0"
@@ -425,11 +428,33 @@ func main() {
 				pty, _, _ := s.Pty()
 				m := initialModel()
 				m.width, m.height = pty.Window.Width, pty.Window.Height
-				m.styles = makeStyles(lipgloss.NewRenderer(s))
-				return m, []tea.ProgramOption{tea.WithAltScreen()}
+
+				// Explicitly handle color profile based on PTY term
+				var profile termenv.Profile
+				switch {
+				case strings.Contains(pty.Term, "truecolor") || strings.Contains(pty.Term, "24bit"):
+					profile = termenv.TrueColor
+				case strings.Contains(pty.Term, "256color"):
+					profile = termenv.ANSI256
+				case strings.Contains(pty.Term, "color") || strings.Contains(pty.Term, "ansi"):
+					profile = termenv.ANSI
+				default:
+					profile = termenv.Ascii
+				}
+
+				// Create a renderer for the session and force the color profile
+				renderer := lipgloss.NewRenderer(s)
+				renderer.SetColorProfile(profile)
+				m.styles = makeStyles(renderer)
+
+				return m, []tea.ProgramOption{
+					tea.WithAltScreen(),
+				}
+
 			}),
 			lm.Middleware(),
 		),
+
 	)
 
 	if err != nil {

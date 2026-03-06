@@ -1,0 +1,6 @@
+[[services]]
+  internal_port = 23234
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 22

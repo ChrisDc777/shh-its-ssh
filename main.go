@@ -400,6 +400,11 @@ func main() {
 		p = fmt.Sprintf("%d", port)
 	}
 
+	if key := os.Getenv("SSH_HOST_KEY"); key != "" {
+		os.MkdirAll(".ssh", 0700)
+		os.WriteFile(".ssh/term_info_ed25519", []byte(key), 0600)
+	}
+
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%s", host, p)),
 		wish.WithHostKeyPath(".ssh/term_info_ed25519"),

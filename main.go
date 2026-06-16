@@ -14,24 +14,29 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
+	"github.com/charmbracelet/wish/activeterm"
 	bm "github.com/charmbracelet/wish/bubbletea"
 	lm "github.com/charmbracelet/wish/logging"
 	"github.com/muesli/termenv"
 )
 
-
-
 const (
-    host = "0.0.0.0"
-    port = 23234
+	host = "0.0.0.0"
+	port = 23234
+
+	// Session limits keep a public, no-auth SSH server friendly on small
+	// (e.g. free-tier) hosts: idle sessions are reaped and no session can be
+	// held open forever. These are enforced entirely in-process — no provider
+	// configuration is required.
+	idleTimeout = 10 * time.Minute
+	maxTimeout  = 30 * time.Minute
 )
 
 var (
-    cyan      = lipgloss.Color("#4ec9b0")
-    white     = lipgloss.Color("#d4d4d4")
-    dimmed    = lipgloss.Color("#6a737d")
+	cyan   = lipgloss.Color("#4ec9b0")
+	white  = lipgloss.Color("#d4d4d4")
+	dimmed = lipgloss.Color("#6a737d")
 )
-
 
 type styles struct {
 	name, title, body, dim, hint, selected lipgloss.Style
@@ -48,11 +53,10 @@ func makeStyles(r *lipgloss.Renderer) styles {
 	}
 }
 
-
 // ── ASCII art ─────────────────────────────────────────────────────────────────
 // Paste your ASCII name art here (generated from https://patorjk.com/software/taag/)
 const asciiName = `
-      __       _   
+      __       _
  ____/ /  ____(_)__
 / __/ _ \/ __/ (_-<
 \__/_//_/_/ /_/___/
@@ -93,222 +97,279 @@ const asciiPortrait = `
 type page int
 
 const (
-    pageHome page = iota
-    pageReflections
-    pageContacts
-    pageArticle
+	pageHome page = iota
+	pageReflections
+	pageContacts
+	pageArticle
+	pageCreations
 )
 
 type article struct {
-    title, summary, link string
+	title, summary, link string
 }
 
 type model struct {
-    page        page
-    navIndex    int    // home nav: 0=Creations,1=Reflections,2=Contacts
-    reflIndex   int    // reflections list cursor
-    articleOpen *article
-    width, height int
-    frame       int
-    styles      styles
+	page          page
+	navIndex      int // home nav: 0=Creations,1=Reflections,2=Contacts
+	reflIndex     int // reflections list cursor
+	articleOpen   *article
+	width, height int
+	frame         int
+	tickEpoch     int // identifies the live animation loop; stale ticks are dropped
+	styles        styles
 }
 
-
 var articles = []article{
-    {
-        title:   "Reimagining Human Labor in the Age of AI",
-        summary: "The true crisis AI reveals isn't job loss but the absence of meaning...",
-        // link:    "https://example.com/article1",
-    },
-    // {
-    //     title:   "AI as a Creative Springboard",
-    //     summary: "Enhancing, Not Replacing, Human Ingenuity...",
-    //     link:    "https://example.com/article2",
-    // },
+	{
+		title:   "Reimagining Human Labor in the Age of AI",
+		summary: "The true crisis AI reveals isn't job loss but the absence of meaning...",
+		// link:    "https://example.com/article1",
+	},
+	// {
+	//     title:   "AI as a Creative Springboard",
+	//     summary: "Enhancing, Not Replacing, Human Ingenuity...",
+	//     link:    "https://example.com/article2",
+	// },
 }
 
 func initialModel() model {
-    return model{page: pageHome, navIndex: 2} // default highlight: Contacts
+	return model{page: pageHome, navIndex: 2} // default highlight: Contacts
 }
 
-type tickMsg time.Time
-
-func tick() tea.Cmd {
-    return tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
-        return tickMsg(t)
-    })
+type tickMsg struct {
+	epoch int
 }
 
-func (m model) Init() tea.Cmd { return tick() }
+// tick schedules the next animation frame for a given loop identity (epoch).
+func tick(epoch int) tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg {
+		return tickMsg{epoch: epoch}
+	})
+}
+
+func (m model) Init() tea.Cmd { return tick(m.tickEpoch) }
+
+// goHome returns to the landing page and restarts the animation loop. A fresh
+// epoch guarantees exactly one live tick loop even after rapid navigation.
+func (m model) goHome() (model, tea.Cmd) {
+	m.page = pageHome
+	m.tickEpoch++
+	return m, tick(m.tickEpoch)
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    switch msg := msg.(type) {
-    case tea.WindowSizeMsg:
-        m.width, m.height = msg.Width, msg.Height
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 
-    case tickMsg:
-        m.frame++
-        return m, tick()
+	case tickMsg:
+		// Drop frames from a superseded loop, and only keep animating while the
+		// landing page (the only animated view) is on screen.
+		if msg.epoch != m.tickEpoch {
+			return m, nil
+		}
+		m.frame++
+		if m.page == pageHome {
+			return m, tick(m.tickEpoch)
+		}
+		return m, nil
 
-    case tea.KeyMsg:
-        switch m.page {
-        case pageHome:
-            switch msg.String() {
-            case "left", "h":
-                if m.navIndex > 0 { m.navIndex-- }
-            case "right", "l":
-                if m.navIndex < 2 { m.navIndex++ }
-            case "enter":
-                switch m.navIndex {
-                case 1: m.page = pageReflections
-                case 2: m.page = pageContacts
-                }
-            case "q", "ctrl+c":
-                return m, tea.Quit
-            }
+	case tea.KeyMsg:
+		switch m.page {
+		case pageHome:
+			switch msg.String() {
+			case "left", "h", "shift+tab":
+				if m.navIndex > 0 {
+					m.navIndex--
+				} else {
+					m.navIndex = 2
+				}
+			case "right", "l", "tab":
+				if m.navIndex < 2 {
+					m.navIndex++
+				} else {
+					m.navIndex = 0
+				}
+			case "enter":
+				switch m.navIndex {
+				case 0:
+					m.page = pageCreations
+				case 1:
+					m.page = pageReflections
+				case 2:
+					m.page = pageContacts
+				}
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
 
-        case pageReflections:
-            switch msg.String() {
-            case "up", "k":
-                if m.reflIndex > 0 { m.reflIndex-- }
-            case "down", "j":
-                if m.reflIndex < len(articles)-1 { m.reflIndex++ }
-            case "enter":
-                a := articles[m.reflIndex]
-                m.articleOpen = &a
-                m.page = pageArticle
-            case "esc":
-                m.page = pageHome
-            case "q", "ctrl+c":
-                return m, tea.Quit
-            }
+		case pageReflections:
+			switch msg.String() {
+			case "up", "k":
+				if m.reflIndex > 0 {
+					m.reflIndex--
+				}
+			case "down", "j":
+				if m.reflIndex < len(articles)-1 {
+					m.reflIndex++
+				}
+			case "enter":
+				a := articles[m.reflIndex]
+				m.articleOpen = &a
+				m.page = pageArticle
+			case "esc":
+				return m.goHome()
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
 
-        case pageArticle, pageContacts:
-            switch msg.String() {
-            case "esc":
-                if m.page == pageArticle {
-                    m.page = pageReflections
-                } else {
-                    m.page = pageHome
-                }
-            case "q", "ctrl+c":
-                return m, tea.Quit
-            }
-        }
-    }
-    return m, nil
+		case pageArticle, pageContacts, pageCreations:
+			switch msg.String() {
+			case "esc":
+				if m.page == pageArticle {
+					m.page = pageReflections
+				} else {
+					return m.goHome()
+				}
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+		}
+	}
+	return m, nil
 }
 
 func (m model) View() string {
-    switch m.page {
-    case pageHome:      return m.viewHome()
-    case pageReflections: return m.viewReflections()
-    case pageContacts:  return m.viewContacts()
-    case pageArticle:   return m.viewArticle()
-    }
-    return ""
+	// Guard against terminals too small to lay out the UI.
+	if m.width > 0 && (m.width < 50 || m.height < 12) {
+		return m.styles.dim.Render(fmt.Sprintf(
+			"\n  Terminal too small to render this portfolio.\n"+
+				"  Please resize to at least 80x24 (current: %dx%d).\n",
+			m.width, m.height))
+	}
+
+	switch m.page {
+	case pageHome:
+		return m.viewHome()
+	case pageReflections:
+		return m.viewReflections()
+	case pageContacts:
+		return m.viewContacts()
+	case pageArticle:
+		return m.viewArticle()
+	case pageCreations:
+		return m.viewCreations()
+	}
+	return ""
 }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 func (m model) renderAnimatedName() string {
-    lines := strings.Split(strings.Trim(asciiName, "\n"), "\n")
-    if len(lines) == 0 {
-        return ""
-    }
+	lines := strings.Split(strings.Trim(asciiName, "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
 
-    // Get max width
-    nameWidth := 0
-    for _, l := range lines {
-        if len(l) > nameWidth {
-            nameWidth = len(l)
-        }
-    }
+	// Get max width
+	nameWidth := 0
+	for _, l := range lines {
+		if len(l) > nameWidth {
+			nameWidth = len(l)
+		}
+	}
 
-    // Reduce space as requested: margins are tighter
-    marginX := 4
-    marginY := 2
-    canvasH := len(lines) + 2*marginY
-    canvasW := nameWidth + 2*marginX
-    grid := make([][]string, canvasH)
-    for i := range grid {
-        grid[i] = make([]string, canvasW)
-        for j := range grid[i] {
-            grid[i][j] = " "
-        }
-    }
+	// Reduce space as requested: margins are tighter
+	marginX := 4
+	marginY := 2
+	canvasH := len(lines) + 2*marginY
+	canvasW := nameWidth + 2*marginX
+	grid := make([][]string, canvasH)
+	for i := range grid {
+		grid[i] = make([]string, canvasW)
+		for j := range grid[i] {
+			grid[i][j] = " "
+		}
+	}
 
-    sparkles := []string{"✦", "✧", "⋆", "✧", "+", ".", "*"}
+	sparkles := []string{"✦", "✧", "⋆", "✧", "+", ".", "*"}
 
-    // Shifting density: sinusoidally oscillate the "target" center
-    centerX := float64(canvasW)/2.0 + math.Sin(float64(m.frame)*0.05)*float64(canvasW)*0.4
-    centerY := float64(canvasH)/2.0 + math.Cos(float64(m.frame)*0.07)*float64(canvasH)*0.4
+	// Shifting density: sinusoidally oscillate the "target" center
+	centerX := float64(canvasW)/2.0 + math.Sin(float64(m.frame)*0.05)*float64(canvasW)*0.4
+	centerY := float64(canvasH)/2.0 + math.Cos(float64(m.frame)*0.07)*float64(canvasH)*0.4
 
-    // More sparkles 
-    numSparkles := 7
-    for i := 0; i < numSparkles; i++ {
-        // Deterministic but diverse seed
-        t := m.frame / 5 // Sparkle positions shift slowly
-        seed := int64(m.frame/3 + i*777)
-        
-        // Use a simple distribution: start with a base random pos
-        // and pull it slightly towards the shifting center
-        baseX := float64((seed * 43) % int64(canvasW))
-        baseY := float64((seed * 37) % int64(canvasH))
-        
-        // Attraction to shifting center (0.3 factor for "random but biased" look)
-        posX := baseX*0.7 + centerX*0.3
-        posY := baseY*0.7 + centerY*0.3
-        
-        x := int(posX)
-        y := int(posY)
+	// More sparkles
+	numSparkles := 7
+	for i := 0; i < numSparkles; i++ {
+		// Deterministic but diverse seed
+		t := m.frame / 5 // Sparkle positions shift slowly
+		seed := int64(m.frame/3 + i*777)
 
-        // Clip to canvas
-        if x < 0 { x = 0 } else if x >= canvasW { x = canvasW - 1 }
-        if y < 0 { y = 0 } else if y >= canvasH { y = canvasH - 1 }
+		// Use a simple distribution: start with a base random pos
+		// and pull it slightly towards the shifting center
+		baseX := float64((seed * 43) % int64(canvasW))
+		baseY := float64((seed * 37) % int64(canvasH))
 
-        // Twinkle effect: only show if "phase" allows (prevents static clumps)
-        phase := (int(seed) + m.frame) % 15
-        if phase < 10 {
-             // Don't place on the name's non-empty characters
-             artX := x - marginX
-             artY := y - marginY
-             isName := false
-             if artY >= 0 && artY < len(lines) && artX >= 0 && artX < len(lines[artY]) {
-                 if lines[artY][artX] != ' ' {
-                     isName = true
-                 }
-             }
+		// Attraction to shifting center (0.3 factor for "random but biased" look)
+		posX := baseX*0.7 + centerX*0.3
+		posY := baseY*0.7 + centerY*0.3
 
-             if !isName {
-                 char := sparkles[(i+t)%len(sparkles)]
-                 grid[y][x] = m.styles.body.Foreground(white).Render(char)
-             }
-        }
-    }
+		x := int(posX)
+		y := int(posY)
 
-    // Place the Name on top
-    for y, line := range lines {
-        for x, char := range line {
-            if char != ' ' {
-                grid[y+marginY][x+marginX] = m.styles.name.Render(string(char))
-            }
+		// Clip to canvas
+		if x < 0 {
+			x = 0
+		} else if x >= canvasW {
+			x = canvasW - 1
+		}
+		if y < 0 {
+			y = 0
+		} else if y >= canvasH {
+			y = canvasH - 1
+		}
 
-        }
-    }
+		// Twinkle effect: only show if "phase" allows (prevents static clumps)
+		phase := (int(seed) + m.frame) % 15
+		if phase < 10 {
+			// Don't place on the name's non-empty characters
+			artX := x - marginX
+			artY := y - marginY
+			isName := false
+			if artY >= 0 && artY < len(lines) && artX >= 0 && artX < len(lines[artY]) {
+				if lines[artY][artX] != ' ' {
+					isName = true
+				}
+			}
 
-    var result strings.Builder
-    for y := range grid {
-        for x := range grid[y] {
-             result.WriteString(grid[y][x])
-        }
-        result.WriteString("\n")
-    }
+			if !isName {
+				char := sparkles[(i+t)%len(sparkles)]
+				grid[y][x] = m.styles.body.Foreground(white).Render(char)
+			}
+		}
+	}
 
-    return result.String()
+	// Place the Name on top
+	for y, line := range lines {
+		for x, char := range line {
+			if char != ' ' {
+				grid[y+marginY][x+marginX] = m.styles.name.Render(string(char))
+			}
+		}
+	}
+
+	var result strings.Builder
+	for y := range grid {
+		for x := range grid[y] {
+			result.WriteString(grid[y][x])
+		}
+		result.WriteString("\n")
+	}
+
+	return result.String()
 }
 
 func (m model) renderLink(text, url string) string {
-    return fmt.Sprintf("\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\", url, text)
+	return fmt.Sprintf("\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\", url, text)
 }
 
 func (m model) wrapText(text string, width int) string {
@@ -334,79 +395,99 @@ func (m model) wrapText(text string, width int) string {
 }
 
 func (m model) viewHome() string {
-    left := m.styles.body.Render(asciiPortrait)
+	// Limit width of bio text to avoid stretching
+	maxWidth := 55
+	if m.width > 0 && m.width-4 < maxWidth {
+		maxWidth = m.width - 4
+	}
 
-    // Limit width of bio text to avoid stretching
-    maxWidth := 55
-    
-    name  := m.renderAnimatedName()
-    bio1 := m.styles.body.Render(m.wrapText("is a software engineer building intelligent systems on the internet, developing scalable products and experimenting with AI.", maxWidth))
-    bio2 := m.styles.body.Render("\n" + m.wrapText("He works across full-stack and backend systems, building APIs, cloud applications, and AI-powered tools.", maxWidth))
-    bio3 := m.styles.dim.Render(m.wrapText("Previously, he studied Computer Science Engineering at Symbiosis Institute of Technology, where he built projects in machine learning, computer vision, and AI-driven data systems.", maxWidth))
-    bio4 := m.styles.dim.Render("\n" + m.wrapText("His work sits at the intersection of software engineering, artificial intelligence, and real-world problem solving.", maxWidth))
-    bio5 := m.styles.dim.Render("Explore the directories below ↓")
+	name := m.renderAnimatedName()
+	bio1 := m.styles.body.Render(m.wrapText("is a software engineer building intelligent systems on the internet, developing scalable products and experimenting with AI.", maxWidth))
+	bio2 := m.styles.body.Render("\n" + m.wrapText("He works across full-stack and backend systems, building APIs, cloud applications, and AI-powered tools.", maxWidth))
+	bio3 := m.styles.dim.Render(m.wrapText("Previously, he studied Computer Science Engineering at Symbiosis Institute of Technology, where he built projects in machine learning, computer vision, and AI-driven data systems.", maxWidth))
+	bio4 := m.styles.dim.Render("\n" + m.wrapText("His work sits at the intersection of software engineering, artificial intelligence, and real-world problem solving.", maxWidth))
+	bio5 := m.styles.dim.Render("Explore the directories below ↓")
 
-    navItems := []string{"Creations(soon)", "Reflections", "Contacts"}
-    nav := ""
-    for i, item := range navItems {
-        if i == m.navIndex {
-            nav += m.styles.selected.String() + m.styles.name.Render(item) + "   "
-        } else {
-            nav += "  " + m.styles.body.Render(item) + "   "
-        }
-    }
+	navItems := []string{"Creations(soon)", "Reflections", "Contacts"}
+	nav := ""
+	for i, item := range navItems {
+		if i == m.navIndex {
+			nav += m.styles.selected.String() + m.styles.name.Render(item) + "   "
+		} else {
+			nav += "  " + m.styles.body.Render(item) + "   "
+		}
+	}
 
-    right := lipgloss.JoinVertical(lipgloss.Left, name, bio1, bio2, bio3, bio4, bio5, "\n"+nav)
-    content := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
-    hint := m.styles.hint.Render("\n[← → to select · enter to open · q to quit]")
-    return lipgloss.JoinVertical(lipgloss.Left, "\n"+content, hint)
+	right := lipgloss.JoinVertical(lipgloss.Left, name, bio1, bio2, bio3, bio4, bio5, "\n"+nav)
+	hint := m.styles.hint.Render("\n[← → / tab to select · enter to open · q to quit]")
+
+	// On narrow terminals, drop the side portrait and stack the content so it
+	// doesn't overflow or wrap awkwardly.
+	if m.width > 0 && m.width < 100 {
+		return lipgloss.JoinVertical(lipgloss.Left, "\n"+right, hint)
+	}
+
+	left := m.styles.body.Render(asciiPortrait)
+	content := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
+	return lipgloss.JoinVertical(lipgloss.Left, "\n"+content, hint)
 }
 
 func (m model) viewReflections() string {
-    out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-    out += m.styles.dim.Render("technology") + "\n"
-    for i, a := range articles {
-        prefix := "    "
-        title  := m.styles.body.Render(a.title)
-        if i == m.reflIndex {
-            prefix = m.styles.selected.String()
-            title  = m.styles.name.Render(a.title)
-        }
-        out += prefix + title + "\n"
-    }
-    out += "\n" + m.styles.hint.Render("[↑ ↓ to select · enter to open · esc back]")
-    return "\n" + out
+	out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	out += m.styles.dim.Render("technology") + "\n"
+	for i, a := range articles {
+		prefix := "    "
+		title := m.styles.body.Render(a.title)
+		if i == m.reflIndex {
+			prefix = m.styles.selected.String()
+			title = m.styles.name.Render(a.title)
+		}
+		out += prefix + title + "\n"
+	}
+	out += "\n" + m.styles.hint.Render("[↑ ↓ to select · enter to open · esc back]")
+	return "\n" + out
 }
 
 func (m model) viewContacts() string {
-    out := m.styles.title.Render("Contacts") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-    contacts := []struct{label, display, url string}{
-        {"IG ", "instagram.com/chrisdcosta777", "https://instagram.com/chrisdcosta777"},
-        {"LI ", "linkedin.com/in/chrisdcosta777", "https://linkedin.com/in/chrisdcosta777"},
-        {"GH ", "github.com/ChrisDc777", "https://github.com/ChrisDc777"},
-    }
-    for _, c := range contacts {
-        clickableLink := m.renderLink(m.styles.body.Render(c.display), c.url)
-        out += m.styles.name.Render(c.label) + "  " + clickableLink + "\n\n"
-    }
-    out += m.styles.hint.Render("[esc] back")
-    return "\n" + out
+	out := m.styles.title.Render("Contacts") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	contacts := []struct{ label, display, url string }{
+		{"IG ", "instagram.com/chrisdcosta777", "https://instagram.com/chrisdcosta777"},
+		{"LI ", "linkedin.com/in/chrisdcosta777", "https://linkedin.com/in/chrisdcosta777"},
+		{"GH ", "github.com/ChrisDc777", "https://github.com/ChrisDc777"},
+	}
+	for _, c := range contacts {
+		clickableLink := m.renderLink(m.styles.body.Render(c.display), c.url)
+		out += m.styles.name.Render(c.label) + "  " + clickableLink + "\n\n"
+	}
+	out += m.styles.hint.Render("[esc] back")
+	return "\n" + out
+}
+
+func (m model) viewCreations() string {
+	out := m.styles.title.Render("Creations") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	out += m.styles.body.Render("Projects and experiments are being curated here.") + "\n"
+	out += m.styles.dim.Render("Check back soon — or find work-in-progress on GitHub.") + "\n\n"
+	clickableLink := m.renderLink(m.styles.body.Render("github.com/ChrisDc777"), "https://github.com/ChrisDc777")
+	out += m.styles.name.Render("GH ") + "  " + clickableLink + "\n\n"
+	out += m.styles.hint.Render("[esc] back")
+	return "\n" + out
 }
 
 func (m model) viewArticle() string {
-    if m.articleOpen == nil { return "" }
-    a := m.articleOpen
-    out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-    out += m.styles.body.Bold(true).Render(a.title) + "\n\n"
-    out += m.styles.body.Render(a.summary) + "\n\n"
-    if a.link != "" {
-        clickableLink := m.renderLink(m.styles.body.Render(a.link), a.link)
-        out += m.styles.name.Render("Read → ") + clickableLink + "\n\n"
-    }
-    out += m.styles.hint.Render("[esc] back")
-    return "\n" + out
+	if m.articleOpen == nil {
+		return ""
+	}
+	a := m.articleOpen
+	out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	out += m.styles.body.Bold(true).Render(a.title) + "\n\n"
+	out += m.styles.body.Render(a.summary) + "\n\n"
+	if a.link != "" {
+		clickableLink := m.renderLink(m.styles.body.Render(a.link), a.link)
+		out += m.styles.name.Render("Read → ") + clickableLink + "\n\n"
+	}
+	out += m.styles.hint.Render("[esc] back")
+	return "\n" + out
 }
-
 
 // ── SSH Server ────────────────────────────────────────────────────────────────
 func main() {
@@ -415,14 +496,22 @@ func main() {
 		p = fmt.Sprintf("%d", port)
 	}
 
+	// Allow a stable host key to be supplied via the environment (e.g. a
+	// platform secret) so the server's identity survives redeploys. If unset,
+	// wish generates an ephemeral key on first start.
 	if key := os.Getenv("SSH_HOST_KEY"); key != "" {
-		os.MkdirAll(".ssh", 0700)
-		os.WriteFile(".ssh/term_info_ed25519", []byte(key), 0600)
+		if err := os.MkdirAll(".ssh", 0700); err != nil {
+			fmt.Println("could not create .ssh dir:", err)
+		} else if err := os.WriteFile(".ssh/term_info_ed25519", []byte(key), 0600); err != nil {
+			fmt.Println("could not write host key:", err)
+		}
 	}
 
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%s", host, p)),
 		wish.WithHostKeyPath(".ssh/term_info_ed25519"),
+		wish.WithIdleTimeout(idleTimeout),
+		wish.WithMaxTimeout(maxTimeout),
 		wish.WithMiddleware(
 			bm.Middleware(func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 				pty, _, _ := s.Pty()
@@ -450,15 +539,14 @@ func main() {
 				return m, []tea.ProgramOption{
 					tea.WithAltScreen(),
 				}
-
 			}),
+			activeterm.Middleware(), // reject sessions without an interactive PTY
 			lm.Middleware(),
 		),
-
 	)
-
 	if err != nil {
-		panic(err)
+		fmt.Println("could not create server:", err)
+		os.Exit(1)
 	}
 
 	done := make(chan os.Signal, 1)
@@ -466,7 +554,7 @@ func main() {
 
 	fmt.Printf("SSH portfolio listening on port %s\n", p)
 	go func() {
-		if err := s.ListenAndServe(); err != nil {
+		if err := s.ListenAndServe(); err != nil && err != ssh.ErrServerClosed {
 			fmt.Println(err)
 		}
 	}()
@@ -474,5 +562,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	s.Shutdown(ctx)
+	if err := s.Shutdown(ctx); err != nil && err != ssh.ErrServerClosed {
+		fmt.Println("could not shut down gracefully:", err)
+	}
 }

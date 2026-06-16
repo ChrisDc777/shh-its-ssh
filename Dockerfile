@@ -3,13 +3,15 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY main.go .
-RUN go build -o portfolio .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o portfolio .
 
 FROM alpine:latest
-RUN apk add --no-cache openssh
-WORKDIR /root
+# Run as a non-root user. wish generates the SSH host key at startup (or reads
+# it from $SSH_HOST_KEY), so no openssh tooling is needed in the image.
+RUN adduser -D -h /app app
+WORKDIR /app
 COPY --from=builder /build/portfolio .
-RUN mkdir -p .ssh && \
-    ssh-keygen -t ed25519 -f .ssh/term_info_ed25519 -N ""
+RUN mkdir -p .ssh && chown -R app:app /app
+USER app
 EXPOSE 23234
 CMD ["./portfolio"]

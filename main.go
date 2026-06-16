@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strings"
@@ -102,6 +103,8 @@ const (
 	pageContacts
 	pageArticle
 	pageCreations
+	pageSnake  // hidden Snake game (easter egg)
+	pageSecret // hidden message screen (easter egg)
 )
 
 type article struct {
@@ -115,7 +118,9 @@ type model struct {
 	articleOpen   *article
 	width, height int
 	frame         int
-	tickEpoch     int // identifies the live animation loop; stale ticks are dropped
+	tickEpoch     int         // identifies the live animation loop; stale ticks are dropped
+	keyLog        []string    // recent landing-page keystrokes, for easter-egg detection
+	snake         *snakeState // active hidden Snake game, if any
 	styles        styles
 }
 
@@ -153,6 +158,8 @@ func (m model) Init() tea.Cmd { return tick(m.tickEpoch) }
 // epoch guarantees exactly one live tick loop even after rapid navigation.
 func (m model) goHome() (model, tea.Cmd) {
 	m.page = pageHome
+	m.keyLog = nil
+	m.snake = nil
 	m.tickEpoch++
 	return m, tick(m.tickEpoch)
 }
@@ -174,9 +181,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case snakeTickMsg:
+		// Advance the hidden Snake game; stop the loop if it's been superseded
+		// or the game ended.
+		if msg.epoch != m.tickEpoch || m.page != pageSnake || m.snake == nil {
+			return m, nil
+		}
+		m.snake.step()
+		if m.snake.dead {
+			return m, nil
+		}
+		return m, snakeTick(m.tickEpoch)
+
 	case tea.KeyMsg:
 		switch m.page {
 		case pageHome:
+			// Buffer keystrokes and watch for hidden sequences before handling
+			// normal navigation (see the Easter eggs section).
+			m.keyLog = append(m.keyLog, msg.String())
+			if len(m.keyLog) > 12 {
+				m.keyLog = m.keyLog[len(m.keyLog)-12:]
+			}
+			if endsWith(m.keyLog, konamiCode) {
+				m.keyLog = nil
+				m.page = pageSecret
+				return m, nil
+			}
+			if endsWith(m.keyLog, snakeCode) {
+				m.keyLog = nil
+				return m.startSnake()
+			}
+
 			switch msg.String() {
 			case "left", "h", "shift+tab":
 				if m.navIndex > 0 {
@@ -223,7 +258,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
-		case pageArticle, pageContacts, pageCreations:
+		case pageSnake:
+			if m.snake == nil {
+				return m.goHome()
+			}
+			switch msg.String() {
+			case "up", "k":
+				m.snake.turn(point{0, -1})
+			case "down", "j":
+				m.snake.turn(point{0, 1})
+			case "left", "h":
+				m.snake.turn(point{-1, 0})
+			case "right", "l":
+				m.snake.turn(point{1, 0})
+			case "r":
+				if m.snake.dead {
+					return m.startSnake()
+				}
+			case "esc":
+				return m.goHome()
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+
+		case pageArticle, pageContacts, pageCreations, pageSecret:
 			switch msg.String() {
 			case "esc":
 				if m.page == pageArticle {
@@ -259,6 +317,13 @@ func (m model) View() string {
 		return m.viewArticle()
 	case pageCreations:
 		return m.viewCreations()
+	case pageSnake:
+		if m.snake == nil {
+			return ""
+		}
+		return m.snake.render(m.styles)
+	case pageSecret:
+		return m.viewSecret()
 	}
 	return ""
 }
@@ -487,6 +552,184 @@ func (m model) viewArticle() string {
 	}
 	out += m.styles.hint.Render("[esc] back")
 	return "\n" + out
+}
+
+func (m model) viewSecret() string {
+	out := m.styles.title.Render("✦ secret unlocked ✦") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	out += m.styles.body.Render("You entered the Konami code. Nicely done.") + "\n\n"
+	out += m.styles.dim.Render("Curiosity is the best debugger.") + "\n"
+	out += m.styles.dim.Render("psst — there's another secret hiding on the home screen.") + "\n\n"
+	out += m.styles.hint.Render("[esc] back")
+	return "\n" + out
+}
+
+// ── Easter eggs ───────────────────────────────────────────────────────────────
+// Two hidden surprises live on the landing page, each triggered by typing a
+// secret key sequence (nothing is advertised in the UI):
+//   - the Konami code (↑ ↑ ↓ ↓ ← → ← → b a) opens a hidden message screen
+//   - typing "snake" launches a small playable Snake game
+
+var (
+	konamiCode = []string{"up", "up", "down", "down", "left", "right", "left", "right", "b", "a"}
+	snakeCode  = []string{"s", "n", "a", "k", "e"}
+)
+
+// endsWith reports whether the tail of log matches seq exactly.
+func endsWith(log, seq []string) bool {
+	if len(log) < len(seq) {
+		return false
+	}
+	tail := log[len(log)-len(seq):]
+	for i := range seq {
+		if tail[i] != seq[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type snakeTickMsg struct {
+	epoch int
+}
+
+func snakeTick(epoch int) tea.Cmd {
+	return tea.Tick(110*time.Millisecond, func(_ time.Time) tea.Msg {
+		return snakeTickMsg{epoch: epoch}
+	})
+}
+
+// startSnake initialises a fresh game sized to the terminal and starts its loop
+// under a new epoch (which also retires any landing-page animation loop).
+func (m model) startSnake() (model, tea.Cmd) {
+	m.snake = newSnake(clamp(m.width-8, 16, 40), clamp(m.height-9, 8, 18))
+	m.page = pageSnake
+	m.tickEpoch++
+	return m, snakeTick(m.tickEpoch)
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+type point struct{ x, y int }
+
+type snakeState struct {
+	w, h    int
+	body    []point // body[0] is the head
+	dir     point
+	pendDir point // direction applied at the next step (buffered input)
+	food    point
+	score   int
+	dead    bool
+}
+
+func newSnake(w, h int) *snakeState {
+	cx, cy := w/2, h/2
+	s := &snakeState{
+		w:       w,
+		h:       h,
+		dir:     point{1, 0},
+		pendDir: point{1, 0},
+		body:    []point{{cx, cy}, {cx - 1, cy}, {cx - 2, cy}},
+	}
+	s.placeFood()
+	return s
+}
+
+func (s *snakeState) placeFood() {
+	for {
+		f := point{rand.Intn(s.w), rand.Intn(s.h)}
+		onSnake := false
+		for _, p := range s.body {
+			if p == f {
+				onSnake = true
+				break
+			}
+		}
+		if !onSnake {
+			s.food = f
+			return
+		}
+	}
+}
+
+// turn buffers a direction change, ignoring 180° reversals into the snake.
+func (s *snakeState) turn(d point) {
+	if d.x == -s.dir.x && d.y == -s.dir.y {
+		return
+	}
+	s.pendDir = d
+}
+
+func (s *snakeState) step() {
+	if s.dead {
+		return
+	}
+	s.dir = s.pendDir
+	head := s.body[0]
+	next := point{head.x + s.dir.x, head.y + s.dir.y}
+
+	// Wall collision.
+	if next.x < 0 || next.x >= s.w || next.y < 0 || next.y >= s.h {
+		s.dead = true
+		return
+	}
+	// Self collision (the tail tip is about to move out of the way).
+	for i, p := range s.body {
+		if i == len(s.body)-1 {
+			continue
+		}
+		if p == next {
+			s.dead = true
+			return
+		}
+	}
+
+	s.body = append([]point{next}, s.body...)
+	if next == s.food {
+		s.score++
+		s.placeFood()
+	} else {
+		s.body = s.body[:len(s.body)-1]
+	}
+}
+
+func (s *snakeState) render(st styles) string {
+	grid := make([][]rune, s.h)
+	for y := range grid {
+		grid[y] = make([]rune, s.w)
+		for x := range grid[y] {
+			grid[y][x] = ' '
+		}
+	}
+	grid[s.food.y][s.food.x] = '◆'
+	for i, p := range s.body {
+		if i == 0 {
+			grid[p.y][p.x] = '█'
+		} else {
+			grid[p.y][p.x] = '▓'
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(st.title.Render("snake") + "  " + st.dim.Render(fmt.Sprintf("score %d", s.score)) + "\n")
+	b.WriteString(st.dim.Render("┌"+strings.Repeat("─", s.w)+"┐") + "\n")
+	for y := range grid {
+		b.WriteString(st.dim.Render("│") + st.name.Render(string(grid[y])) + st.dim.Render("│") + "\n")
+	}
+	b.WriteString(st.dim.Render("└"+strings.Repeat("─", s.w)+"┘") + "\n")
+	if s.dead {
+		b.WriteString("\n" + st.name.Render("game over") + st.dim.Render(fmt.Sprintf("  ·  final score %d  ·  [r] restart  ·  [esc] back", s.score)))
+	} else {
+		b.WriteString("\n" + st.hint.Render("[← ↑ → ↓ / hjkl] move  ·  [esc] back  ·  [q] quit"))
+	}
+	return "\n" + b.String()
 }
 
 // ── SSH Server ────────────────────────────────────────────────────────────────

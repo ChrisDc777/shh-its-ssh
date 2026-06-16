@@ -17,3 +17,7 @@ Thumbs.db
 
 # Project specific
 ssh-portfolio
+portfolio
+
+# SSH host keys must never be committed
+.ssh/

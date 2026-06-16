@@ -1,0 +1,6 @@
+.git
+.github
+.ssh
+*.md
+fly.toml
+LICENSE

@@ -33,24 +33,33 @@ const (
 	maxTimeout  = 30 * time.Minute
 )
 
-var (
-	cyan   = lipgloss.Color("#4ec9b0")
-	white  = lipgloss.Color("#d4d4d4")
-	dimmed = lipgloss.Color("#6a737d")
-)
+// ── Themes ────────────────────────────────────────────────────────────────────
+type theme struct {
+	name            string
+	accent, fg, dim lipgloss.Color
+}
+
+// themes[0] is the default. The rest are unlocked via the hidden Konami code and
+// cycled with the "t" key (see the Easter eggs section).
+var themes = []theme{
+	{"teal", "#4ec9b0", "#d4d4d4", "#6a737d"},
+	{"amber", "#e3b341", "#e6dcc8", "#8a7f6a"},
+	{"synthwave", "#ff6ac1", "#d7c6ff", "#7c6f9b"},
+	{"mono", "#c9d1d9", "#c9d1d9", "#586069"},
+}
 
 type styles struct {
 	name, title, body, dim, hint, selected lipgloss.Style
 }
 
-func makeStyles(r *lipgloss.Renderer) styles {
+func makeStyles(r *lipgloss.Renderer, t theme) styles {
 	return styles{
-		name:     r.NewStyle().Foreground(cyan).Bold(true),
-		title:    r.NewStyle().Foreground(cyan).Underline(true),
-		body:     r.NewStyle().Foreground(white),
-		dim:      r.NewStyle().Foreground(dimmed),
-		hint:     r.NewStyle().Foreground(dimmed),
-		selected: r.NewStyle().Foreground(cyan).SetString("✦ "),
+		name:     r.NewStyle().Foreground(t.accent).Bold(true),
+		title:    r.NewStyle().Foreground(t.accent).Underline(true),
+		body:     r.NewStyle().Foreground(t.fg),
+		dim:      r.NewStyle().Foreground(t.dim),
+		hint:     r.NewStyle().Foreground(t.dim),
+		selected: r.NewStyle().Foreground(t.accent).SetString("✦ "),
 	}
 }
 
@@ -105,6 +114,7 @@ const (
 	pageCreations
 	pageSnake  // hidden Snake game (easter egg)
 	pageSecret // hidden message screen (easter egg)
+	pageBoot   // intro/boot sequence shown on connect
 )
 
 type article struct {
@@ -121,7 +131,20 @@ type model struct {
 	tickEpoch     int         // identifies the live animation loop; stale ticks are dropped
 	keyLog        []string    // recent landing-page keystrokes, for easter-egg detection
 	snake         *snakeState // active hidden Snake game, if any
-	styles        styles
+
+	// Connection-aware greeting, computed once at connect time.
+	guestName  string
+	greetWord  string
+	clientHint string
+
+	// Theming + secret hunt.
+	renderer       *lipgloss.Renderer
+	themeIndex     int
+	themesUnlocked bool
+	foundSnake     bool
+	foundKonami    bool
+
+	styles styles
 }
 
 var articles = []article{
@@ -137,8 +160,12 @@ var articles = []article{
 	// },
 }
 
+// bootFrames is how long (in 100ms ticks) the intro sequence plays before it
+// auto-advances to the landing page.
+const bootFrames = 26
+
 func initialModel() model {
-	return model{page: pageHome, navIndex: 2} // default highlight: Contacts
+	return model{page: pageBoot, navIndex: 2} // default home highlight: Contacts
 }
 
 type tickMsg struct {
@@ -176,6 +203,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.frame++
+		if m.page == pageBoot {
+			if m.frame > bootFrames {
+				m.page = pageHome
+				m.frame = 0
+			}
+			return m, tick(m.tickEpoch)
+		}
 		if m.page == pageHome {
 			return m, tick(m.tickEpoch)
 		}
@@ -194,7 +228,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, snakeTick(m.tickEpoch)
 
 	case tea.KeyMsg:
+		// Global: once unlocked via the Konami code, "t" cycles color palettes
+		// from any page.
+		if m.themesUnlocked && msg.String() == "t" {
+			m.themeIndex = (m.themeIndex + 1) % len(themes)
+			if m.renderer != nil {
+				m.styles = makeStyles(m.renderer, themes[m.themeIndex])
+			}
+			return m, nil
+		}
+
 		switch m.page {
+		case pageBoot:
+			// Any key skips the intro.
+			if k := msg.String(); k == "q" || k == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m.goHome()
+
 		case pageHome:
 			// Buffer keystrokes and watch for hidden sequences before handling
 			// normal navigation (see the Easter eggs section).
@@ -204,11 +255,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if endsWith(m.keyLog, konamiCode) {
 				m.keyLog = nil
+				m.foundKonami = true
+				m.themesUnlocked = true
 				m.page = pageSecret
 				return m, nil
 			}
 			if endsWith(m.keyLog, snakeCode) {
 				m.keyLog = nil
+				m.foundSnake = true
 				return m.startSnake()
 			}
 
@@ -307,6 +361,8 @@ func (m model) View() string {
 	}
 
 	switch m.page {
+	case pageBoot:
+		return m.viewBoot()
 	case pageHome:
 		return m.viewHome()
 	case pageReflections:
@@ -408,7 +464,7 @@ func (m model) renderAnimatedName() string {
 
 			if !isName {
 				char := sparkles[(i+t)%len(sparkles)]
-				grid[y][x] = m.styles.body.Foreground(white).Render(char)
+				grid[y][x] = m.styles.body.Render(char)
 			}
 		}
 	}
@@ -459,6 +515,27 @@ func (m model) wrapText(text string, width int) string {
 	return res.String()
 }
 
+func (m model) viewBoot() string {
+	lines := []string{
+		m.styles.dim.Render("▸ establishing secure channel…"),
+		m.styles.dim.Render("▸ handshake ok · ") + m.styles.body.Render(m.clientHint),
+		m.styles.body.Render("▸ "+m.greetWord+", ") + m.styles.name.Render(m.guestName),
+		m.styles.dim.Render("▸ welcome to ") + m.styles.name.Render("chris") + m.styles.dim.Render("'s terminal"),
+	}
+	shown := m.frame / 4
+	var b strings.Builder
+	b.WriteString("\n\n")
+	for i, l := range lines {
+		if i <= shown {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	if shown >= len(lines) {
+		b.WriteString("\n  " + m.styles.hint.Render("press any key…"))
+	}
+	return b.String()
+}
+
 func (m model) viewHome() string {
 	// Limit width of bio text to avoid stretching
 	maxWidth := 55
@@ -484,7 +561,11 @@ func (m model) viewHome() string {
 	}
 
 	right := lipgloss.JoinVertical(lipgloss.Left, name, bio1, bio2, bio3, bio4, bio5, "\n"+nav)
-	hint := m.styles.hint.Render("\n[← → / tab to select · enter to open · q to quit]")
+	hintText := "\n[← → / tab to select · enter to open · q to quit]"
+	if m.themesUnlocked {
+		hintText = "\n[← → / tab · enter to open · t theme · q to quit]"
+	}
+	hint := m.styles.hint.Render(hintText)
 
 	// On narrow terminals, drop the side portrait and stack the content so it
 	// doesn't overflow or wrap awkwardly.
@@ -554,11 +635,35 @@ func (m model) viewArticle() string {
 	return "\n" + out
 }
 
+const totalSecrets = 2
+
+func (m model) secretsFound() int {
+	n := 0
+	if m.foundSnake {
+		n++
+	}
+	if m.foundKonami {
+		n++
+	}
+	return n
+}
+
+func mark(found bool) string {
+	if found {
+		return "✓"
+	}
+	return "·"
+}
+
 func (m model) viewSecret() string {
 	out := m.styles.title.Render("✦ secret unlocked ✦") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
 	out += m.styles.body.Render("You entered the Konami code. Nicely done.") + "\n\n"
-	out += m.styles.dim.Render("Curiosity is the best debugger.") + "\n"
-	out += m.styles.dim.Render("psst — there's another secret hiding on the home screen.") + "\n\n"
+	out += m.styles.name.Render(fmt.Sprintf("secrets found: %d/%d", m.secretsFound(), totalSecrets)) + "\n"
+	out += m.styles.dim.Render(fmt.Sprintf("  %s konami   %s snake (type it on the home screen)",
+		mark(m.foundKonami), mark(m.foundSnake))) + "\n\n"
+	out += m.styles.body.Render("Palettes unlocked — press ") + m.styles.name.Render("t") +
+		m.styles.body.Render(" anywhere to cycle themes.") + "\n\n"
+	out += m.styles.dim.Render("Curiosity is the best debugger.") + "\n\n"
 	out += m.styles.hint.Render("[esc] back")
 	return "\n" + out
 }
@@ -732,6 +837,55 @@ func (s *snakeState) render(st styles) string {
 	return "\n" + b.String()
 }
 
+// ── Connection-aware greeting ─────────────────────────────────────────────────
+// greetWord picks a salutation from the server's local time of day (this is
+// chris's clock, not the visitor's — SSH doesn't reliably expose the client's
+// timezone).
+func greetWord(t time.Time) string {
+	switch h := t.Hour(); {
+	case h < 5:
+		return "Burning the midnight oil"
+	case h < 12:
+		return "Good morning"
+	case h < 17:
+		return "Good afternoon"
+	case h < 21:
+		return "Good evening"
+	default:
+		return "Good night"
+	}
+}
+
+// greetingName uses the SSH username the visitor connected as (e.g.
+// `ssh nova@host` → "nova"), falling back to a friendly placeholder for the
+// usual anonymous logins.
+func greetingName(s ssh.Session) string {
+	switch u := strings.TrimSpace(s.User()); strings.ToLower(u) {
+	case "", "root", "guest", "anonymous", "user", "ssh", "visitor":
+		return "stranger"
+	default:
+		return u
+	}
+}
+
+// clientHint summarises the visitor's SSH client and terminal, e.g.
+// "OpenSSH_9.6 · xterm-256color".
+func clientHint(s ssh.Session, pty ssh.Pty) string {
+	cv := s.Context().ClientVersion()
+	cv = strings.TrimPrefix(cv, "SSH-2.0-")
+	cv = strings.TrimPrefix(cv, "SSH-1.99-")
+	if i := strings.IndexByte(cv, ' '); i > 0 {
+		cv = cv[:i]
+	}
+	if cv == "" {
+		cv = "unknown client"
+	}
+	if pty.Term == "" {
+		return cv
+	}
+	return cv + " · " + pty.Term
+}
+
 // ── SSH Server ────────────────────────────────────────────────────────────────
 func main() {
 	p := os.Getenv("PORT")
@@ -760,6 +914,9 @@ func main() {
 				pty, _, _ := s.Pty()
 				m := initialModel()
 				m.width, m.height = pty.Window.Width, pty.Window.Height
+				m.guestName = greetingName(s)
+				m.greetWord = greetWord(time.Now())
+				m.clientHint = clientHint(s, pty)
 
 				// Explicitly handle color profile based on PTY term
 				var profile termenv.Profile
@@ -777,7 +934,8 @@ func main() {
 				// Create a renderer for the session and force the color profile
 				renderer := lipgloss.NewRenderer(s)
 				renderer.SetColorProfile(profile)
-				m.styles = makeStyles(renderer)
+				m.renderer = renderer
+				m.styles = makeStyles(renderer, themes[m.themeIndex])
 
 				return m, []tea.ProgramOption{
 					tea.WithAltScreen(),

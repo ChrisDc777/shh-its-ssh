@@ -17,11 +17,13 @@ Built with [Charm](https://charm.sh)'s [`wish`](https://github.com/charmbracelet
 
 ## Features
 
+- A short animated boot sequence and a connection-aware greeting (it knows your SSH username, client, and the time of day).
 - Animated ASCII name with a twinkling starfield on the landing page.
 - Keyboard-driven navigation between **Creations**, **Reflections**, and **Contacts**.
 - Clickable links (OSC&nbsp;8 hyperlinks) in supporting terminals.
 - Per-session color-profile detection (truecolor / 256 / ANSI / mono).
 - Responsive layout that adapts to narrow terminals.
+- A couple of hidden surprises for the curious. 👀
 
 ### Controls
 

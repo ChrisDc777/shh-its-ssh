@@ -35,6 +35,29 @@ Built with [Charm](https://charm.sh)'s [`wish`](https://github.com/charmbracelet
 | `esc` | Go back |
 | `q` / `ctrl+c` | Quit |
 
+## Non-interactive use
+
+The portfolio also answers like a CLI, so it works from scripts and pipes:
+
+```sh
+ssh <host> whoami      # short bio
+ssh <host> social      # contact links
+ssh <host> resume      # plaintext resume
+ssh <host> help        # all commands
+ssh <host> | less      # plaintext portfolio (no terminal needed)
+```
+
+And you can download a few generated files over `scp`/`sftp`:
+
+```sh
+scp <host>:chris.vcf .     # a vCard for your contacts app
+scp <host>:resume.txt .    # the resume as a text file
+scp <host>:card.txt .      # an ASCII business card
+sftp <host>                # browse and grab any of them
+```
+
+(Files are served read-only from memory — there's nothing to upload.)
+
 ## Run locally
 
 Requires Go 1.24+.

@@ -22,6 +22,7 @@ Built with [Charm](https://charm.sh)'s [`wish`](https://github.com/charmbracelet
 - **Reflections** render as scrollable, styled Markdown (via [glamour](https://github.com/charmbracelet/glamour)).
 - Animated ASCII name with a twinkling starfield on the landing page.
 - Keyboard-driven navigation between **Creations**, **Reflections**, **Contacts**, and the **Guestbook**.
+- Switchable color themes (teal, amber, synthwave, mono) — press `t` anytime.
 - Clickable links (OSC&nbsp;8 hyperlinks) in supporting terminals.
 - Per-session color-profile detection (truecolor / 256 / ANSI / mono).
 - Responsive layout that adapts to narrow terminals.
@@ -32,8 +33,9 @@ Built with [Charm](https://charm.sh)'s [`wish`](https://github.com/charmbracelet
 | Key | Action |
 | --- | --- |
 | `←` `→` / `tab` / `h` `l` | Move between sections (home) |
-| `↑` `↓` / `k` `j` | Move within a list |
+| `↑` `↓` / `k` `j` | Move within a list / scroll an article |
 | `enter` | Open the selected section / item |
+| `t` | Cycle the color theme |
 | `esc` | Go back |
 | `q` / `ctrl+c` | Quit |
 

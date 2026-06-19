@@ -58,6 +58,14 @@ screen shows a live count and `pageGuestbook` renders the wall + a text input
 (`m.input`) that calls `hub.post` on Enter. **If you add shared live state, route
 it through the hub and broadcast the same way.**
 
+## Article reader (Reflections)
+
+Each `article` has an optional Markdown `body`. Opening one (`openArticle`)
+renders the Markdown with **glamour** and loads it into a **bubbles `viewport`**
+sized to the terminal, so `pageArticle` scrolls (arrows / `j` `k` / pgup/pgdn).
+When `body` is empty, `articleMarkdown` generates a stub from the title/summary —
+**fill in `body` (Markdown) in the `articles` slice to publish real essays.**
+
 ## Non-interactive surfaces (`cli.go`)
 
 Shared content (bio, `contacts`, `fullName`) lives here so the TUI and the

@@ -11,7 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -118,6 +120,7 @@ const (
 
 type article struct {
 	title, summary, link string
+	body                 string // Markdown; falls back to a generated stub when empty
 }
 
 type model struct {
@@ -148,22 +151,27 @@ type model struct {
 	presence hubState
 	input    string
 
+	// Scrollable Markdown reader for the open article.
+	viewport viewport.Model
+
 	styles styles
 }
 
 // homeNav lists the landing-page sections in order.
 var homeNav = []string{"Creations(soon)", "Reflections", "Contacts", "Guestbook"}
 
+// articles back the Reflections section. Set `body` to Markdown to publish a
+// full essay (it renders scrollable via glamour); without one, a stub is shown.
 var articles = []article{
 	{
 		title:   "Reimagining Human Labor in the Age of AI",
 		summary: "The true crisis AI reveals isn't job loss but the absence of meaning...",
-		// link:    "https://example.com/article1",
+		// link: "https://example.com/article1",
+		// body: "# Reimagining Human Labor…\n\nYour Markdown here.",
 	},
 	// {
 	//     title:   "AI as a Creative Springboard",
 	//     summary: "Enhancing, Not Replacing, Human Ingenuity...",
-	//     link:    "https://example.com/article2",
 	// },
 }
 
@@ -338,9 +346,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.reflIndex++
 				}
 			case "enter":
-				a := articles[m.reflIndex]
-				m.articleOpen = &a
-				m.page = pageArticle
+				return m.openArticle(articles[m.reflIndex]), nil
 			case "esc":
 				return m.goHome()
 			case "q", "ctrl+c":
@@ -400,14 +406,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
-		case pageArticle, pageContacts, pageCreations, pageSecret:
+		case pageArticle:
 			switch msg.String() {
 			case "esc":
-				if m.page == pageArticle {
-					m.page = pageReflections
-				} else {
-					return m.goHome()
-				}
+				m.page = pageReflections
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			default:
+				// Everything else (arrows, j/k, pgup/pgdn, space) scrolls.
+				var cmd tea.Cmd
+				m.viewport, cmd = m.viewport.Update(msg)
+				return m, cmd
+			}
+
+		case pageContacts, pageCreations, pageSecret:
+			switch msg.String() {
+			case "esc":
+				return m.goHome()
 			case "q", "ctrl+c":
 				return m, tea.Quit
 			}
@@ -705,20 +720,75 @@ func (m model) viewCreations() string {
 	return "\n" + out
 }
 
+// openArticle renders an article's Markdown into a scrollable viewport sized to
+// the terminal.
+func (m model) openArticle(a article) model {
+	w := m.width - 4
+	if w < 20 {
+		w = 20
+	}
+	h := m.height - 6
+	if h < 5 {
+		h = 5
+	}
+	vp := viewport.New(w, h)
+	vp.SetContent(renderMarkdown(articleMarkdown(a), w))
+	m.viewport = vp
+	m.articleOpen = &a
+	m.page = pageArticle
+	return m
+}
+
+// articleMarkdown returns the article body, or a generated stub built from its
+// title/summary when no body has been written yet.
+func articleMarkdown(a article) string {
+	if strings.TrimSpace(a.body) != "" {
+		return a.body
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n", a.title)
+	if a.summary != "" {
+		fmt.Fprintf(&b, "> %s\n\n", a.summary)
+	}
+	b.WriteString("---\n\n")
+	b.WriteString("*This piece is being written.* When it's ready it renders right here — ")
+	b.WriteString("Markdown styled for the terminal:\n\n")
+	b.WriteString("- **bold**, *italic*, and `inline code`\n")
+	b.WriteString("- lists, quotes, and headings\n")
+	b.WriteString("- links your terminal can open\n\n")
+	if a.link != "" {
+		fmt.Fprintf(&b, "[Read the original](%s)\n", a.link)
+	} else {
+		b.WriteString("_Check back soon._\n")
+	}
+	return b.String()
+}
+
+// renderMarkdown turns Markdown into styled terminal output, wrapped to width.
+// On any failure it falls back to the raw Markdown.
+func renderMarkdown(md string, width int) string {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return md
+	}
+	out, err := r.Render(md)
+	if err != nil {
+		return md
+	}
+	return out
+}
+
 func (m model) viewArticle() string {
 	if m.articleOpen == nil {
 		return ""
 	}
-	a := m.articleOpen
-	out := m.styles.title.Render("Reflections") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-	out += m.styles.body.Bold(true).Render(a.title) + "\n\n"
-	out += m.styles.body.Render(a.summary) + "\n\n"
-	if a.link != "" {
-		clickableLink := m.renderLink(m.styles.body.Render(a.link), a.link)
-		out += m.styles.name.Render("Read → ") + clickableLink + "\n\n"
-	}
-	out += m.styles.hint.Render("[esc] back")
-	return "\n" + out
+	header := m.styles.title.Render("Reflections") + m.styles.dim.Render("  ·  "+m.articleOpen.title) + "\n"
+	footer := m.styles.hint.Render("[↑ ↓ / pgup pgdn to scroll · esc back]") +
+		m.styles.dim.Render(fmt.Sprintf("   %.0f%%", m.viewport.ScrollPercent()*100))
+	return "\n" + header + m.viewport.View() + "\n" + footer
 }
 
 const totalSecrets = 2

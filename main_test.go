@@ -255,6 +255,30 @@ func TestViewGuestbookAndHomePresence(t *testing.T) {
 	}
 }
 
+func TestArticleReader(t *testing.T) {
+	md := articleMarkdown(article{title: "Title Here", summary: "Summary line"})
+	for _, want := range []string{"# Title Here", "> Summary line", "being written"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("article stub missing %q:\n%s", want, md)
+		}
+	}
+	if got := articleMarkdown(article{title: "X", body: "# Real Body"}); got != "# Real Body" {
+		t.Errorf("explicit body should win, got %q", got)
+	}
+	out := renderMarkdown("# Hello\n\nworld", 80)
+	if !strings.Contains(out, "Hello") || !strings.Contains(out, "world") {
+		t.Errorf("rendered markdown lost its text:\n%s", out)
+	}
+	m := testModel()
+	m = m.openArticle(article{title: "My Essay", summary: "the gist"})
+	if m.page != pageArticle || m.articleOpen == nil {
+		t.Fatal("openArticle should switch to the article page")
+	}
+	if v := m.viewArticle(); !strings.Contains(v, "Reflections") || !strings.Contains(v, "My Essay") {
+		t.Errorf("article view missing header/title:\n%s", v)
+	}
+}
+
 func TestHubJoinLeaveCount(t *testing.T) {
 	p1 := tea.NewProgram(testModel())
 	p2 := tea.NewProgram(testModel())

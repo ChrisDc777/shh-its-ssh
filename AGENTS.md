@@ -103,8 +103,7 @@ The Snake game has its own `snakeTick`/`snakeTickMsg` (slower) but shares the sa
 On the home page, `Update` appends each keystroke to a small rolling `keyLog` and
 checks for hidden sequences via `endsWith`:
 
-- **Konami code** (`konamiCode`) → opens `pageSecret`, sets `foundKonami`, and
-  unlocks themes.
+- **Konami code** (`konamiCode`) → opens `pageSecret`, sets `foundKonami`.
 - Typing **`snake`** (`snakeCode`) → `startSnake()`, sets `foundSnake`.
 
 `pageSecret` shows a secret-hunt meter (`secretsFound` / `totalSecrets`). Update
@@ -113,10 +112,11 @@ checks for hidden sequences via `endsWith`:
 ## Theming
 
 `theme` is an accent/fg/dim palette; `themes[0]` is the default. `makeStyles(r, t)`
-builds the per-session `styles` from a renderer + theme. Themes are locked until
-the Konami code unlocks them; then `t` cycles palettes from any page (handled at
-the top of the `KeyMsg` case, so it works everywhere). Runtime theme switching
-rebuilds `styles` from the stored `m.renderer`.
+builds the per-session `styles` from a renderer + theme. `t` cycles palettes from
+any page (handled at the top of the `KeyMsg` case, so it works everywhere) except
+while typing in the guestbook. Runtime theme switching rebuilds `styles` from the
+stored `m.renderer`. (The Konami code is a separate easter egg — it opens the
+secret-hunt screen; it no longer gates themes.)
 
 ## Connection-aware greeting
 

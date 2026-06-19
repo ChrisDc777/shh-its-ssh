@@ -140,11 +140,10 @@ type model struct {
 	clientHint string
 
 	// Theming + secret hunt.
-	renderer       *lipgloss.Renderer
-	themeIndex     int
-	themesUnlocked bool
-	foundSnake     bool
-	foundKonami    bool
+	renderer    *lipgloss.Renderer
+	themeIndex  int
+	foundSnake  bool
+	foundKonami bool
 
 	// Live presence + guestbook (shared via hub).
 	hub      *hub
@@ -269,9 +268,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Global: once unlocked via the Konami code, "t" cycles color palettes
-		// from any page — except while typing in the guestbook.
-		if m.themesUnlocked && msg.String() == "t" && m.page != pageGuestbook {
+		// Global: "t" cycles color palettes from any page — except while typing
+		// in the guestbook, where it's just text.
+		if msg.String() == "t" && m.page != pageGuestbook {
 			m.themeIndex = (m.themeIndex + 1) % len(themes)
 			if m.renderer != nil {
 				m.styles = makeStyles(m.renderer, themes[m.themeIndex])
@@ -297,7 +296,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if endsWith(m.keyLog, konamiCode) {
 				m.keyLog = nil
 				m.foundKonami = true
-				m.themesUnlocked = true
 				m.page = pageSecret
 				return m, nil
 			}
@@ -667,11 +665,7 @@ func (m model) viewHome() string {
 		cols = append(cols, m.styles.dim.Render(fmt.Sprintf("● %d exploring now", m.presence.count)))
 	}
 	right := lipgloss.JoinVertical(lipgloss.Left, cols...)
-	hintText := "\n[← → / tab to select · enter to open · q to quit]"
-	if m.themesUnlocked {
-		hintText = "\n[← → / tab · enter to open · t theme · q to quit]"
-	}
-	hint := m.styles.hint.Render(hintText)
+	hint := m.styles.hint.Render("\n[← → / tab · enter to open · t theme · q to quit]")
 
 	// On narrow terminals, drop the side portrait and stack the content so it
 	// doesn't overflow or wrap awkwardly.
@@ -817,8 +811,6 @@ func (m model) viewSecret() string {
 	out += m.styles.name.Render(fmt.Sprintf("secrets found: %d/%d", m.secretsFound(), totalSecrets)) + "\n"
 	out += m.styles.dim.Render(fmt.Sprintf("  %s konami   %s snake (type it on the home screen)",
 		mark(m.foundKonami), mark(m.foundSnake))) + "\n\n"
-	out += m.styles.body.Render("Palettes unlocked — press ") + m.styles.name.Render("t") +
-		m.styles.body.Render(" anywhere to cycle themes.") + "\n\n"
 	out += m.styles.dim.Render("Curiosity is the best debugger.") + "\n\n"
 	out += m.styles.hint.Render("[esc] back")
 	return "\n" + out

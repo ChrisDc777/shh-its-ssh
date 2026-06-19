@@ -76,26 +76,27 @@ func TestViewSecretMeter(t *testing.T) {
 	if !strings.Contains(out, "2/2") {
 		t.Errorf("secret meter should read 2/2:\n%s", out)
 	}
-	if !strings.Contains(out, "Palettes unlocked") {
-		t.Errorf("secret screen should mention palette unlock:\n%s", out)
-	}
 }
 
-func TestKonamiUnlocksThemes(t *testing.T) {
+func TestThemeCycleAndKonami(t *testing.T) {
+	// "t" cycles palettes immediately — no unlock required.
 	m := testModel()
+	m.page = pageHome
+	before := m.themeIndex
+	nm, _ := m.Update(keyMsg("t"))
+	m = nm.(model)
+	if m.themeIndex == before {
+		t.Fatal("'t' should cycle the active theme")
+	}
+	// The Konami code is still an easter egg that opens the secret screen.
+	m = testModel()
 	m.page = pageHome
 	for _, k := range konamiCode {
 		nm, _ := m.Update(keyMsg(k))
 		m = nm.(model)
 	}
-	if !m.themesUnlocked || !m.foundKonami || m.page != pageSecret {
-		t.Fatalf("konami did not work: unlocked=%v konami=%v page=%v", m.themesUnlocked, m.foundKonami, m.page)
-	}
-	before := m.themeIndex
-	nm, _ := m.Update(keyMsg("t"))
-	m = nm.(model)
-	if m.themeIndex == before {
-		t.Fatal("'t' should cycle the active theme once unlocked")
+	if !m.foundKonami || m.page != pageSecret {
+		t.Fatalf("konami should open the secret screen: konami=%v page=%v", m.foundKonami, m.page)
 	}
 }
 

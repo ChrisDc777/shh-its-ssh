@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +137,43 @@ func TestGreetWord(t *testing.T) {
 		if !strings.Contains(strings.ToLower(g), want) {
 			t.Errorf("hour %d: got %q, want substring %q", h, g, want)
 		}
+	}
+}
+
+func TestRunCommand(t *testing.T) {
+	if out, code := runCommand([]string{"help"}); code != 0 || !strings.Contains(out, "scp") {
+		t.Errorf("help should list scp downloads, code=%d:\n%s", code, out)
+	}
+	if out, _ := runCommand([]string{"social"}); !strings.Contains(out, "github.com/ChrisDc777") {
+		t.Errorf("social should list links:\n%s", out)
+	}
+	if out, _ := runCommand([]string{"resume"}); !strings.Contains(out, fullName) {
+		t.Errorf("resume should include the name:\n%s", out)
+	}
+	if out, code := runCommand([]string{"bogus"}); code != 2 || !strings.Contains(out, "unknown command") {
+		t.Errorf("unknown command should exit non-zero with help, code=%d:\n%s", code, out)
+	}
+}
+
+func TestVCardAndAssets(t *testing.T) {
+	vc := vCard()
+	for _, want := range []string{"BEGIN:VCARD", "VERSION:3.0", "FN:" + fullName, "github.com/ChrisDc777", "END:VCARD"} {
+		if !strings.Contains(vc, want) {
+			t.Errorf("vCard missing %q:\n%s", want, vc)
+		}
+	}
+	assetFS := buildAssetFS()
+	for _, name := range []string{"chris.vcf", "resume.txt", "card.txt"} {
+		b, err := fs.ReadFile(assetFS, name)
+		if err != nil || len(b) == 0 {
+			t.Errorf("asset %q not readable: err=%v len=%d", name, err, len(b))
+		}
+	}
+}
+
+func TestPlainPortfolio(t *testing.T) {
+	out := plainPortfolio()
+	if !strings.Contains(out, "software engineer") || !strings.Contains(out, "github.com/ChrisDc777") {
+		t.Errorf("plain portfolio should include bio and links:\n%s", out)
 	}
 }

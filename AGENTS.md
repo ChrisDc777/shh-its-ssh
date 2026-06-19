@@ -15,17 +15,36 @@ in **`main_test.go`**.
 
 ## Runtime shape
 
-`main()` starts a `wish` server with this middleware stack (outermost first):
+`main()` starts a `wish` server. A session is routed by its shape (middleware
+stack, outermost first):
 
 1. `logging` — logs each connection.
-2. `activeterm` — rejects sessions without an interactive PTY.
-3. `bubbletea` — runs the TUI `model` for the session.
+2. `scp` — if the command is an scp transfer, serve it read-only from the
+   in-memory asset FS; otherwise fall through.
+3. `cliMiddleware` (`cli.go`) — if there's a command (`ssh host whoami`), run it
+   and exit; if there's no PTY (a pipe), print the plaintext portfolio and exit;
+   otherwise fall through.
+4. `bubbletea` — the interactive TUI, reached only by a PTY session with no
+   command.
 
-Each session gets its own `model` and its own `lipgloss.Renderer` (color profile
-is derived from the client's `$TERM`). The host key is loaded from
+Separately, an **SFTP subsystem** (`withSFTP`, `cli.go`) serves the same asset FS
+read-only, so modern `scp` (which speaks SFTP by default), `scp -O` (legacy SCP
+via the middleware), and `sftp` all work. There is no `activeterm` — the routing
+above subsumes it.
+
+Each interactive session gets its own `model` and `lipgloss.Renderer` (color
+profile derived from the client's `$TERM`). The host key is loaded from
 `.ssh/term_info_ed25519`; if absent, `wish` generates one. `$SSH_HOST_KEY` (PEM)
 overrides it so the identity is stable across redeploys. `$PORT` overrides the
 listen port. Idle/max session timeouts bound resource use on small hosts.
+
+## Non-interactive surfaces (`cli.go`)
+
+Shared content (bio, `contacts`, `fullName`) lives here so the TUI and the
+non-interactive surfaces stay in sync. `cli.go` provides: the CLI command
+dispatch (`runCommand`), the plaintext portfolio (`plainPortfolio`), the
+generated downloadable assets (`vCard`, `resumeText`, `cardText`, exposed via
+`buildAssetFS` as an in-memory `fs.FS`), and the SFTP handler.
 
 ## The Bubble Tea model
 
@@ -81,7 +100,8 @@ reliably expose the visitor's timezone.
 
 ## Conventions
 
-- One file (`main.go`); keep it `gofmt`-clean (CI enforces).
+- `main.go` is the TUI + server; `cli.go` is the non-interactive surface
+  (commands, plaintext, scp/sftp assets). Keep both `gofmt`-clean (CI enforces).
 - No new dependencies without reason; prefer the Charm stack already vendored.
 - Add a test in `main_test.go` for new logic. Tests render views with an Ascii
   (plain-text) renderer and assert on substrings — no SSH needed.

@@ -15,9 +15,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
-	"github.com/charmbracelet/wish/activeterm"
 	bm "github.com/charmbracelet/wish/bubbletea"
 	lm "github.com/charmbracelet/wish/logging"
+	"github.com/charmbracelet/wish/scp"
 	"github.com/muesli/termenv"
 )
 
@@ -544,10 +544,10 @@ func (m model) viewHome() string {
 	}
 
 	name := m.renderAnimatedName()
-	bio1 := m.styles.body.Render(m.wrapText("is a software engineer building intelligent systems on the internet, developing scalable products and experimenting with AI.", maxWidth))
-	bio2 := m.styles.body.Render("\n" + m.wrapText("He works across full-stack and backend systems, building APIs, cloud applications, and AI-powered tools.", maxWidth))
-	bio3 := m.styles.dim.Render(m.wrapText("Previously, he studied Computer Science Engineering at Symbiosis Institute of Technology, where he built projects in machine learning, computer vision, and AI-driven data systems.", maxWidth))
-	bio4 := m.styles.dim.Render("\n" + m.wrapText("His work sits at the intersection of software engineering, artificial intelligence, and real-world problem solving.", maxWidth))
+	bio1 := m.styles.body.Render(m.wrapText(bioLead, maxWidth))
+	bio2 := m.styles.body.Render("\n" + m.wrapText(bioWork, maxWidth))
+	bio3 := m.styles.dim.Render(m.wrapText(bioEdu, maxWidth))
+	bio4 := m.styles.dim.Render("\n" + m.wrapText(bioFocus, maxWidth))
 	bio5 := m.styles.dim.Render("Explore the directories below ↓")
 
 	navItems := []string{"Creations(soon)", "Reflections", "Contacts"}
@@ -596,14 +596,9 @@ func (m model) viewReflections() string {
 
 func (m model) viewContacts() string {
 	out := m.styles.title.Render("Contacts") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-	contacts := []struct{ label, display, url string }{
-		{"IG ", "instagram.com/chrisdcosta777", "https://instagram.com/chrisdcosta777"},
-		{"LI ", "linkedin.com/in/chrisdcosta777", "https://linkedin.com/in/chrisdcosta777"},
-		{"GH ", "github.com/ChrisDc777", "https://github.com/ChrisDc777"},
-	}
 	for _, c := range contacts {
 		clickableLink := m.renderLink(m.styles.body.Render(c.display), c.url)
-		out += m.styles.name.Render(c.label) + "  " + clickableLink + "\n\n"
+		out += m.styles.name.Render(c.short+" ") + "  " + clickableLink + "\n\n"
 	}
 	out += m.styles.hint.Render("[esc] back")
 	return "\n" + out
@@ -904,12 +899,18 @@ func main() {
 		}
 	}
 
+	// In-memory files served read-only over scp (vCard, resume, business card).
+	assetFS := buildAssetFS()
+
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%s", host, p)),
 		wish.WithHostKeyPath(".ssh/term_info_ed25519"),
 		wish.WithIdleTimeout(idleTimeout),
 		wish.WithMaxTimeout(maxTimeout),
+		withSFTP(assetFS), // read-only SFTP so modern `scp`/`sftp` work
 		wish.WithMiddleware(
+			// Innermost: the interactive TUI. Only reached for a PTY session
+			// with no command (cliMiddleware routes everything else away).
 			bm.Middleware(func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 				pty, _, _ := s.Pty()
 				m := initialModel()
@@ -941,8 +942,9 @@ func main() {
 					tea.WithAltScreen(),
 				}
 			}),
-			activeterm.Middleware(), // reject sessions without an interactive PTY
-			lm.Middleware(),
+			cliMiddleware, // `ssh host <cmd>` and pipes → plaintext
+			scp.Middleware(scp.NewFSReadHandler(assetFS), nil), // `scp host:file .` downloads (read-only)
+			lm.Middleware(), // logging (outermost)
 		),
 	)
 	if err != nil {

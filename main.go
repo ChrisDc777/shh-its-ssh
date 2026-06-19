@@ -15,10 +15,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
-	bm "github.com/charmbracelet/wish/bubbletea"
 	lm "github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/scp"
-	"github.com/muesli/termenv"
 )
 
 const (
@@ -112,9 +110,10 @@ const (
 	pageContacts
 	pageArticle
 	pageCreations
-	pageSnake  // hidden Snake game (easter egg)
-	pageSecret // hidden message screen (easter egg)
-	pageBoot   // intro/boot sequence shown on connect
+	pageSnake     // hidden Snake game (easter egg)
+	pageSecret    // hidden message screen (easter egg)
+	pageBoot      // intro/boot sequence shown on connect
+	pageGuestbook // live presence + shared guestbook wall
 )
 
 type article struct {
@@ -144,8 +143,16 @@ type model struct {
 	foundSnake     bool
 	foundKonami    bool
 
+	// Live presence + guestbook (shared via hub).
+	hub      *hub
+	presence hubState
+	input    string
+
 	styles styles
 }
+
+// homeNav lists the landing-page sections in order.
+var homeNav = []string{"Creations(soon)", "Reflections", "Contacts", "Guestbook"}
 
 var articles = []article{
 	{
@@ -179,7 +186,18 @@ func tick(epoch int) tea.Cmd {
 	})
 }
 
-func (m model) Init() tea.Cmd { return tick(m.tickEpoch) }
+func (m model) Init() tea.Cmd {
+	if m.hub != nil {
+		return tea.Batch(tick(m.tickEpoch), hubSnapshotCmd(m.hub))
+	}
+	return tick(m.tickEpoch)
+}
+
+// hubSnapshotCmd delivers the hub's current state to this program once, so a
+// freshly-connected session sees presence/guestbook immediately.
+func hubSnapshotCmd(h *hub) tea.Cmd {
+	return func() tea.Msg { return hubMsg(h.snapshot()) }
+}
 
 // goHome returns to the landing page and restarts the animation loop. A fresh
 // epoch guarantees exactly one live tick loop even after rapid navigation.
@@ -187,8 +205,19 @@ func (m model) goHome() (model, tea.Cmd) {
 	m.page = pageHome
 	m.keyLog = nil
 	m.snake = nil
+	m.input = ""
 	m.tickEpoch++
 	return m, tick(m.tickEpoch)
+}
+
+// goGuestbook opens the live guestbook and refreshes its state.
+func (m model) goGuestbook() (model, tea.Cmd) {
+	m.page = pageGuestbook
+	m.input = ""
+	if m.hub != nil {
+		return m, hubSnapshotCmd(m.hub)
+	}
+	return m, nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -227,10 +256,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, snakeTick(m.tickEpoch)
 
+	case hubMsg:
+		m.presence = hubState(msg)
+		return m, nil
+
 	case tea.KeyMsg:
 		// Global: once unlocked via the Konami code, "t" cycles color palettes
-		// from any page.
-		if m.themesUnlocked && msg.String() == "t" {
+		// from any page — except while typing in the guestbook.
+		if m.themesUnlocked && msg.String() == "t" && m.page != pageGuestbook {
 			m.themeIndex = (m.themeIndex + 1) % len(themes)
 			if m.renderer != nil {
 				m.styles = makeStyles(m.renderer, themes[m.themeIndex])
@@ -271,10 +304,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.navIndex > 0 {
 					m.navIndex--
 				} else {
-					m.navIndex = 2
+					m.navIndex = len(homeNav) - 1
 				}
 			case "right", "l", "tab":
-				if m.navIndex < 2 {
+				if m.navIndex < len(homeNav)-1 {
 					m.navIndex++
 				} else {
 					m.navIndex = 0
@@ -287,6 +320,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.page = pageReflections
 				case 2:
 					m.page = pageContacts
+				case 3:
+					return m.goGuestbook()
 				}
 			case "q", "ctrl+c":
 				return m, tea.Quit
@@ -335,6 +370,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
+		case pageGuestbook:
+			// A simple text input: type a message, enter posts it to the wall.
+			switch msg.Type {
+			case tea.KeyEnter:
+				if m.hub != nil {
+					m.hub.post(m.guestName, m.input)
+				}
+				m.input = ""
+			case tea.KeyBackspace, tea.KeyDelete:
+				if r := []rune(m.input); len(r) > 0 {
+					m.input = string(r[:len(r)-1])
+				}
+			case tea.KeySpace:
+				if len([]rune(m.input)) < maxGuestLen {
+					m.input += " "
+				}
+			case tea.KeyRunes:
+				if len([]rune(m.input)) < maxGuestLen {
+					m.input += string(msg.Runes)
+				}
+			case tea.KeyEsc:
+				if m.input != "" {
+					m.input = ""
+				} else {
+					return m.goHome()
+				}
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			}
+
 		case pageArticle, pageContacts, pageCreations, pageSecret:
 			switch msg.String() {
 			case "esc":
@@ -380,8 +445,31 @@ func (m model) View() string {
 		return m.snake.render(m.styles)
 	case pageSecret:
 		return m.viewSecret()
+	case pageGuestbook:
+		return m.viewGuestbook()
 	}
 	return ""
+}
+
+func (m model) viewGuestbook() string {
+	out := m.styles.title.Render("Guestbook") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
+	out += m.styles.name.Render("● ") + m.styles.body.Render(presenceLine(m.presence.count)) + "\n\n"
+
+	if len(m.presence.entries) == 0 {
+		out += m.styles.dim.Render("No marks yet — be the first.") + "\n"
+	} else {
+		entries := m.presence.entries
+		if len(entries) > 8 {
+			entries = entries[len(entries)-8:]
+		}
+		for _, e := range entries {
+			out += m.styles.name.Render(e.name) + m.styles.dim.Render(": ") + m.styles.body.Render(e.text) + "\n"
+		}
+	}
+
+	out += "\n" + m.styles.dim.Render("leave a mark ") + m.styles.body.Render("› "+m.input) + m.styles.name.Render("▌") + "\n"
+	out += "\n" + m.styles.hint.Render("[type · enter to post · esc back]")
+	return "\n" + out
 }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
@@ -550,9 +638,8 @@ func (m model) viewHome() string {
 	bio4 := m.styles.dim.Render("\n" + m.wrapText(bioFocus, maxWidth))
 	bio5 := m.styles.dim.Render("Explore the directories below ↓")
 
-	navItems := []string{"Creations(soon)", "Reflections", "Contacts"}
 	nav := ""
-	for i, item := range navItems {
+	for i, item := range homeNav {
 		if i == m.navIndex {
 			nav += m.styles.selected.String() + m.styles.name.Render(item) + "   "
 		} else {
@@ -560,7 +647,11 @@ func (m model) viewHome() string {
 		}
 	}
 
-	right := lipgloss.JoinVertical(lipgloss.Left, name, bio1, bio2, bio3, bio4, bio5, "\n"+nav)
+	cols := []string{name, bio1, bio2, bio3, bio4, bio5, "\n" + nav}
+	if m.presence.count > 1 {
+		cols = append(cols, m.styles.dim.Render(fmt.Sprintf("● %d exploring now", m.presence.count)))
+	}
+	right := lipgloss.JoinVertical(lipgloss.Left, cols...)
 	hintText := "\n[← → / tab to select · enter to open · q to quit]"
 	if m.themesUnlocked {
 		hintText = "\n[← → / tab · enter to open · t theme · q to quit]"
@@ -901,6 +992,8 @@ func main() {
 
 	// In-memory files served read-only over scp (vCard, resume, business card).
 	assetFS := buildAssetFS()
+	// Shared live state (presence + guestbook) across all sessions.
+	h := newHub()
 
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%s", host, p)),
@@ -909,39 +1002,9 @@ func main() {
 		wish.WithMaxTimeout(maxTimeout),
 		withSFTP(assetFS), // read-only SFTP so modern `scp`/`sftp` work
 		wish.WithMiddleware(
-			// Innermost: the interactive TUI. Only reached for a PTY session
-			// with no command (cliMiddleware routes everything else away).
-			bm.Middleware(func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-				pty, _, _ := s.Pty()
-				m := initialModel()
-				m.width, m.height = pty.Window.Width, pty.Window.Height
-				m.guestName = greetingName(s)
-				m.greetWord = greetWord(time.Now())
-				m.clientHint = clientHint(s, pty)
-
-				// Explicitly handle color profile based on PTY term
-				var profile termenv.Profile
-				switch {
-				case strings.Contains(pty.Term, "truecolor") || strings.Contains(pty.Term, "24bit"):
-					profile = termenv.TrueColor
-				case strings.Contains(pty.Term, "256color"):
-					profile = termenv.ANSI256
-				case strings.Contains(pty.Term, "color") || strings.Contains(pty.Term, "ansi"):
-					profile = termenv.ANSI
-				default:
-					profile = termenv.Ascii
-				}
-
-				// Create a renderer for the session and force the color profile
-				renderer := lipgloss.NewRenderer(s)
-				renderer.SetColorProfile(profile)
-				m.renderer = renderer
-				m.styles = makeStyles(renderer, themes[m.themeIndex])
-
-				return m, []tea.ProgramOption{
-					tea.WithAltScreen(),
-				}
-			}),
+			// Innermost: the interactive TUI (PTY + no command). teaMiddleware
+			// builds the per-session model and registers it with the hub.
+			teaMiddleware(h),
 			cliMiddleware, // `ssh host <cmd>` and pipes → plaintext
 			scp.Middleware(scp.NewFSReadHandler(assetFS), nil), // `scp host:file .` downloads (read-only)
 			lm.Middleware(), // logging (outermost)

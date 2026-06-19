@@ -18,8 +18,9 @@ Built with [Charm](https://charm.sh)'s [`wish`](https://github.com/charmbracelet
 ## Features
 
 - A short animated boot sequence and a connection-aware greeting (it knows your SSH username, client, and the time of day).
+- A live **guestbook** wall with real-time presence — see who else is connected right now and leave a mark everyone sees instantly.
 - Animated ASCII name with a twinkling starfield on the landing page.
-- Keyboard-driven navigation between **Creations**, **Reflections**, and **Contacts**.
+- Keyboard-driven navigation between **Creations**, **Reflections**, **Contacts**, and the **Guestbook**.
 - Clickable links (OSC&nbsp;8 hyperlinks) in supporting terminals.
 - Per-session color-profile detection (truecolor / 256 / ANSI / mono).
 - Responsive layout that adapts to narrow terminals.

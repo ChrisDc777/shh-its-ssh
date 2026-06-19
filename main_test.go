@@ -177,3 +177,97 @@ func TestPlainPortfolio(t *testing.T) {
 		t.Errorf("plain portfolio should include bio and links:\n%s", out)
 	}
 }
+
+func TestHubPostAndCap(t *testing.T) {
+	h := newHub()
+	h.post("nova", "  hello world  ")
+	h.post("ada", "") // empty is ignored
+	st := h.snapshot()
+	if len(st.entries) != 1 || st.entries[0].name != "nova" || st.entries[0].text != "hello world" {
+		t.Fatalf("post/trim failed: %+v", st.entries)
+	}
+	for i := 0; i < maxGuestEntries+10; i++ {
+		h.post("x", "msg")
+	}
+	if got := len(h.snapshot().entries); got != maxGuestEntries {
+		t.Fatalf("guestbook should cap at %d, got %d", maxGuestEntries, got)
+	}
+}
+
+func TestGuestbookInputPosts(t *testing.T) {
+	m := testModel()
+	m.hub = newHub()
+	m.guestName = "nova"
+	m, _ = m.goGuestbook()
+	if m.page != pageGuestbook {
+		t.Fatalf("expected guestbook page, got %v", m.page)
+	}
+	for _, r := range "hi" {
+		nm, _ := m.Update(keyMsg(string(r)))
+		m = nm.(model)
+	}
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(model)
+	if m.input != "" {
+		t.Errorf("input should clear after posting, got %q", m.input)
+	}
+	if st := m.hub.snapshot(); len(st.entries) != 1 || st.entries[0].text != "hi" {
+		t.Fatalf("guestbook post not recorded: %+v", st.entries)
+	}
+}
+
+func TestPresenceLine(t *testing.T) {
+	if !strings.Contains(presenceLine(1), "only one") {
+		t.Error("count 1 should read 'only one'")
+	}
+	if !strings.Contains(presenceLine(4), "3 others") {
+		t.Errorf("count 4 should read '3 others', got %q", presenceLine(4))
+	}
+}
+
+func TestHubMsgUpdatesPresence(t *testing.T) {
+	m := testModel()
+	nm, _ := m.Update(hubMsg{count: 3, entries: []guestEntry{{"ada", "hi"}}})
+	m = nm.(model)
+	if m.presence.count != 3 || len(m.presence.entries) != 1 {
+		t.Fatalf("hubMsg should update presence: %+v", m.presence)
+	}
+}
+
+func TestViewGuestbookAndHomePresence(t *testing.T) {
+	m := testModel()
+	m.presence = hubState{count: 2, entries: []guestEntry{{"ada", "first mark"}}}
+
+	gb := m.viewGuestbook()
+	for _, want := range []string{"Guestbook", "first mark", "ada", "other person"} {
+		if !strings.Contains(gb, want) {
+			t.Errorf("guestbook view missing %q:\n%s", want, gb)
+		}
+	}
+
+	m.page = pageHome
+	if !strings.Contains(m.viewHome(), "exploring now") {
+		t.Error("home should show the live presence indicator when count > 1")
+	}
+	m.presence.count = 1
+	if strings.Contains(m.viewHome(), "exploring now") {
+		t.Error("home should hide the presence indicator when you're alone")
+	}
+}
+
+func TestHubJoinLeaveCount(t *testing.T) {
+	p1 := tea.NewProgram(testModel())
+	p2 := tea.NewProgram(testModel())
+	defer p1.Kill()
+	defer p2.Kill()
+	h := newHub()
+	h.join(p1)
+	h.join(p2)
+	if got := h.snapshot().count; got != 2 {
+		t.Fatalf("expected 2 present, got %d", got)
+	}
+	h.leave(p1)
+	if got := h.snapshot().count; got != 1 {
+		t.Fatalf("expected 1 present after leave, got %d", got)
+	}
+}

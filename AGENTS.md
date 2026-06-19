@@ -24,8 +24,10 @@ stack, outermost first):
 3. `cliMiddleware` (`cli.go`) — if there's a command (`ssh host whoami`), run it
    and exit; if there's no PTY (a pipe), print the plaintext portfolio and exit;
    otherwise fall through.
-4. `bubbletea` — the interactive TUI, reached only by a PTY session with no
-   command.
+4. `teaMiddleware` (`presence.go`) — the interactive TUI, reached only by a PTY
+   session with no command. It builds the per-session model, runs the Bubble Tea
+   program (mirroring wish's bubbletea middleware: window-size plumbing + graceful
+   quit), and registers the program with the hub for the connection's lifetime.
 
 Separately, an **SFTP subsystem** (`withSFTP`, `cli.go`) serves the same asset FS
 read-only, so modern `scp` (which speaks SFTP by default), `scp -O` (legacy SCP
@@ -37,6 +39,24 @@ profile derived from the client's `$TERM`). The host key is loaded from
 `.ssh/term_info_ed25519`; if absent, `wish` generates one. `$SSH_HOST_KEY` (PEM)
 overrides it so the identity is stable across redeploys. `$PORT` overrides the
 listen port. Idle/max session timeouts bound resource use on small hosts.
+
+## Live presence + guestbook (`presence.go`)
+
+`hub` is the shared in-memory state across all sessions: the set of connected
+`*tea.Program`s (presence count) and the guestbook `entries` (capped). It's
+intentionally ephemeral — it resets on restart, which is fine for "right now"
+presence.
+
+`teaMiddleware` calls `hub.join(p)` before running the program and `hub.leave(p)`
+after. Any change (join/leave/post) calls `hub.broadcast`, which sends a `hubMsg`
+snapshot to every program. Sends run in their own goroutines because a program
+that hasn't started `Run()` yet would block on its unbuffered message channel. A
+freshly-connected session also pulls an initial snapshot in `Init` (`hubSnapshotCmd`).
+
+The model handles `hubMsg` by storing the snapshot in `m.presence`; the home
+screen shows a live count and `pageGuestbook` renders the wall + a text input
+(`m.input`) that calls `hub.post` on Enter. **If you add shared live state, route
+it through the hub and broadcast the same way.**
 
 ## Non-interactive surfaces (`cli.go`)
 

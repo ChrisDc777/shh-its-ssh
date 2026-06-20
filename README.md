@@ -82,10 +82,20 @@ git-ignored and must never be committed).
 | --- | --- | --- |
 | `PORT` | `23234` | TCP port to listen on. |
 | `SSH_HOST_KEY` | _(unset)_ | PEM-encoded ed25519 private key used as the server's host key. Set this to a stable value so the host identity survives redeploys. |
+| `DATA_DIR` | _(unset)_ | Directory for persisting the guestbook + visit count. Unset → in-memory only (resets on restart). Point it at a mounted volume to make them durable. |
 
-Session limits (`idleTimeout`, `maxTimeout` in `main.go`) keep this public,
-no-auth server resource-friendly on small hosts — idle and very long-lived
-sessions are reaped automatically. No platform configuration is required.
+Session limits (`idleTimeout`, `maxTimeout`), per-IP connection rate limiting,
+and a per-session guestbook post cooldown (all in code) keep this public,
+no-auth server resource-friendly and civil on small hosts — no platform
+configuration required.
+
+### Persisting the guestbook (optional)
+
+The guestbook and visitor count live in memory by default and reset on restart.
+To keep them, mount a persistent volume and set `DATA_DIR` to its path (e.g. on
+Railway: add a Volume, then set `DATA_DIR=/data`). State is written atomically to
+`$DATA_DIR/guestbook.json`. If the directory isn't writable, the app logs a notice
+and falls back to in-memory — it never fails to boot over storage.
 
 ### Stable host key (recommended for production)
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"strings"
@@ -180,15 +181,16 @@ func TestPlainPortfolio(t *testing.T) {
 }
 
 func TestHubPostAndCap(t *testing.T) {
-	h := newHub()
-	h.post("nova", "  hello world  ")
-	h.post("ada", "") // empty is ignored
+	h := newHub(newStore())
+	h.post("1.0.0.1", "nova", "  hello world  ")
+	h.post("1.0.0.2", "ada", "") // empty is ignored
 	st := h.snapshot()
 	if len(st.entries) != 1 || st.entries[0].name != "nova" || st.entries[0].text != "hello world" {
 		t.Fatalf("post/trim failed: %+v", st.entries)
 	}
+	// Distinct IPs so the per-IP throttle doesn't interfere with the cap test.
 	for i := 0; i < maxGuestEntries+10; i++ {
-		h.post("x", "msg")
+		h.post(fmt.Sprintf("10.0.0.%d", i), "x", "msg")
 	}
 	if got := len(h.snapshot().entries); got != maxGuestEntries {
 		t.Fatalf("guestbook should cap at %d, got %d", maxGuestEntries, got)
@@ -197,7 +199,7 @@ func TestHubPostAndCap(t *testing.T) {
 
 func TestGuestbookInputPosts(t *testing.T) {
 	m := testModel()
-	m.hub = newHub()
+	m.hub = newHub(newStore())
 	m.guestName = "nova"
 	m, _ = m.goGuestbook()
 	if m.page != pageGuestbook {
@@ -285,14 +287,71 @@ func TestHubJoinLeaveCount(t *testing.T) {
 	p2 := tea.NewProgram(testModel())
 	defer p1.Kill()
 	defer p2.Kill()
-	h := newHub()
+	h := newHub(newStore())
 	h.join(p1)
 	h.join(p2)
-	if got := h.snapshot().count; got != 2 {
-		t.Fatalf("expected 2 present, got %d", got)
+	st := h.snapshot()
+	if st.count != 2 {
+		t.Fatalf("expected 2 present, got %d", st.count)
+	}
+	if st.visits != 2 {
+		t.Fatalf("expected 2 all-time visits, got %d", st.visits)
 	}
 	h.leave(p1)
 	if got := h.snapshot().count; got != 1 {
 		t.Fatalf("expected 1 present after leave, got %d", got)
+	}
+}
+
+func TestLimiter(t *testing.T) {
+	l := newLimiter(3, time.Minute)
+	for i := 0; i < 3; i++ {
+		if !l.allow("ip") {
+			t.Fatalf("hit %d should be allowed", i)
+		}
+	}
+	if l.allow("ip") {
+		t.Fatal("4th hit should be denied")
+	}
+	if !l.allow("other") {
+		t.Fatal("a different key should have its own budget")
+	}
+}
+
+func TestStorePersistAcrossReload(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+
+	h1 := newHub(newStore())
+	h1.join(tea.NewProgram(testModel())) // visit #1
+	h1.post("1.2.3.4", "nova", "persisted mark")
+
+	// A fresh hub backed by the same dir reloads the saved state.
+	h2 := newHub(newStore())
+	st := h2.snapshot()
+	if st.visits != 1 {
+		t.Fatalf("visits should persist, got %d", st.visits)
+	}
+	if len(st.entries) != 1 || st.entries[0].text != "persisted mark" {
+		t.Fatalf("entries should persist, got %+v", st.entries)
+	}
+}
+
+func TestPostCooldown(t *testing.T) {
+	m := testModel()
+	m.hub = newHub(newStore())
+	m, _ = m.goGuestbook()
+	m.input = "first"
+	m = m.postGuestbook()
+	if m.input != "" || len(m.hub.snapshot().entries) != 1 {
+		t.Fatalf("first post should succeed: input=%q entries=%d", m.input, len(m.hub.snapshot().entries))
+	}
+	// Immediately posting again is held back by the cooldown.
+	m.input = "second"
+	m = m.postGuestbook()
+	if m.input != "second" || m.gbNote == "" {
+		t.Errorf("rapid second post should be held back with a note, input=%q note=%q", m.input, m.gbNote)
+	}
+	if got := len(m.hub.snapshot().entries); got != 1 {
+		t.Errorf("cooldown should prevent the second post, entries=%d", got)
 	}
 }

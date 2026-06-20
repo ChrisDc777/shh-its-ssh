@@ -42,16 +42,25 @@ listen port. Idle/max session timeouts bound resource use on small hosts.
 
 ## Live presence + guestbook (`presence.go`)
 
-`hub` is the shared in-memory state across all sessions: the set of connected
-`*tea.Program`s (presence count) and the guestbook `entries` (capped). It's
-intentionally ephemeral — it resets on restart, which is fine for "right now"
-presence.
+`hub` is the shared state across all sessions: the set of connected `*tea.Program`s
+(presence count, in-memory only), the all-time visit count, and the guestbook
+`entries` (capped). Presence is "right now" and never persisted; the visit count
+and entries are persisted (see below).
 
 `teaMiddleware` calls `hub.join(p)` before running the program and `hub.leave(p)`
 after. Any change (join/leave/post) calls `hub.broadcast`, which sends a `hubMsg`
 snapshot to every program. Sends run in their own goroutines because a program
 that hasn't started `Run()` yet would block on its unbuffered message channel. A
 freshly-connected session also pulls an initial snapshot in `Init` (`hubSnapshotCmd`).
+
+**Persistence** (`store.go`): on join/post the visit count + entries are written
+atomically to `$DATA_DIR/guestbook.json` and loaded in `newHub`. With `DATA_DIR`
+unset or not writable the store is a no-op (in-memory only) — the app always boots.
+
+**Abuse protection** (`ratelimit.go`): `rateLimitMiddleware` rejects an IP that
+opens more than `connsPerMin` connections/minute; `hub.post` throttles posts per
+IP (`postsPerMin`); the model enforces a per-session `postCooldown`. `limiter` is
+a generic per-key sliding window reused for both.
 
 The model handles `hubMsg` by storing the snapshot in `m.presence`; the home
 screen shows a live count and `pageGuestbook` renders the wall + a text input

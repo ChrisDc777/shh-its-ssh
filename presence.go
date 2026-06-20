@@ -17,33 +17,50 @@ import (
 const (
 	maxGuestEntries = 50
 	maxGuestLen     = 120
+	postsPerMin     = 6 // per-IP guestbook posts per minute
 )
 
 type guestEntry struct{ name, text string }
 
 type hubState struct {
 	count   int
+	visits  int
 	entries []guestEntry
 }
 
 // hubMsg delivers a fresh presence/guestbook snapshot to a session's program.
 type hubMsg hubState
 
-// hub is the shared, in-memory live state across every connected session: who's
-// online and the guestbook wall. It's intentionally ephemeral — it resets on
-// restart, which is fine for a "right now" presence feature.
+// hub is the shared live state across every connected session: who's online, the
+// all-time visit count, and the guestbook wall. Presence is in-memory (a "right
+// now" thing); the guestbook + visit count are persisted via store when a data
+// dir is configured, so they survive restarts.
 type hub struct {
 	mu       sync.Mutex
 	programs map[*tea.Program]struct{}
 	entries  []guestEntry
+	visits   int
+	posts    *limiter
+	store    *store
 }
 
-func newHub() *hub {
-	return &hub{programs: map[*tea.Program]struct{}{}}
+func newHub(st *store) *hub {
+	visits, entries := st.load()
+	return &hub{
+		programs: map[*tea.Program]struct{}{},
+		entries:  entries,
+		visits:   visits,
+		posts:    newLimiter(postsPerMin, time.Minute),
+		store:    st,
+	}
 }
 
 func (h *hub) stateLocked() hubState {
-	return hubState{count: len(h.programs), entries: append([]guestEntry(nil), h.entries...)}
+	return hubState{
+		count:   len(h.programs),
+		visits:  h.visits,
+		entries: append([]guestEntry(nil), h.entries...),
+	}
 }
 
 func (h *hub) snapshot() hubState {
@@ -71,7 +88,11 @@ func (h *hub) broadcast() {
 func (h *hub) join(p *tea.Program) {
 	h.mu.Lock()
 	h.programs[p] = struct{}{}
+	h.visits++
+	visits := h.visits
+	entries := append([]guestEntry(nil), h.entries...)
 	h.mu.Unlock()
+	h.store.save(visits, entries)
 	h.broadcast()
 }
 
@@ -82,10 +103,15 @@ func (h *hub) leave(p *tea.Program) {
 	h.broadcast()
 }
 
-func (h *hub) post(name, text string) {
+// post adds a guestbook entry, throttled per source IP. It returns false when
+// the IP is posting too fast (so the caller can keep the draft and nudge them).
+func (h *hub) post(ip, name, text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return
+		return true
+	}
+	if !h.posts.allow(ip) {
+		return false
 	}
 	if len([]rune(text)) > maxGuestLen {
 		text = string([]rune(text)[:maxGuestLen])
@@ -95,8 +121,12 @@ func (h *hub) post(name, text string) {
 	if len(h.entries) > maxGuestEntries {
 		h.entries = h.entries[len(h.entries)-maxGuestEntries:]
 	}
+	visits := h.visits
+	entries := append([]guestEntry(nil), h.entries...)
 	h.mu.Unlock()
+	h.store.save(visits, entries)
 	h.broadcast()
+	return true
 }
 
 func presenceLine(n int) string {
@@ -120,6 +150,7 @@ func newModel(s ssh.Session, pty ssh.Pty, h *hub) model {
 	m.guestName = greetingName(s)
 	m.greetWord = greetWord(time.Now())
 	m.clientHint = clientHint(s, pty)
+	m.remoteIP = remoteIP(s)
 	m.hub = h
 
 	var profile termenv.Profile

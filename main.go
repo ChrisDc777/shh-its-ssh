@@ -31,6 +31,9 @@ const (
 	// configuration is required.
 	idleTimeout = 10 * time.Minute
 	maxTimeout  = 30 * time.Minute
+
+	// connsPerMin caps new connections per source IP per minute.
+	connsPerMin = 12
 )
 
 // ── Themes ────────────────────────────────────────────────────────────────────
@@ -149,6 +152,9 @@ type model struct {
 	hub      *hub
 	presence hubState
 	input    string
+	remoteIP string
+	lastPost time.Time
+	gbNote   string // transient guestbook status line
 
 	// Scrollable Markdown reader for the open article.
 	viewport viewport.Model
@@ -206,6 +212,9 @@ func hubSnapshotCmd(h *hub) tea.Cmd {
 	return func() tea.Msg { return hubMsg(h.snapshot()) }
 }
 
+// postCooldown is the minimum gap between guestbook posts from one session.
+const postCooldown = 4 * time.Second
+
 // goHome returns to the landing page and restarts the animation loop. A fresh
 // epoch guarantees exactly one live tick loop even after rapid navigation.
 func (m model) goHome() (model, tea.Cmd) {
@@ -213,6 +222,7 @@ func (m model) goHome() (model, tea.Cmd) {
 	m.keyLog = nil
 	m.snake = nil
 	m.input = ""
+	m.gbNote = ""
 	m.tickEpoch++
 	return m, tick(m.tickEpoch)
 }
@@ -221,10 +231,32 @@ func (m model) goHome() (model, tea.Cmd) {
 func (m model) goGuestbook() (model, tea.Cmd) {
 	m.page = pageGuestbook
 	m.input = ""
+	m.gbNote = ""
 	if m.hub != nil {
 		return m, hubSnapshotCmd(m.hub)
 	}
 	return m, nil
+}
+
+// postGuestbook submits the current draft, respecting a per-session cooldown and
+// the hub's per-IP throttle; it surfaces a transient note when held back.
+func (m model) postGuestbook() model {
+	if strings.TrimSpace(m.input) == "" {
+		m.input = ""
+		return m
+	}
+	if time.Since(m.lastPost) < postCooldown {
+		m.gbNote = "one sec — you're posting fast"
+		return m
+	}
+	if m.hub != nil && !m.hub.post(m.remoteIP, m.guestName, m.input) {
+		m.gbNote = "easy there — too many posts, try again shortly"
+		return m
+	}
+	m.lastPost = time.Now()
+	m.input = ""
+	m.gbNote = ""
+	return m
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -378,22 +410,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A simple text input: type a message, enter posts it to the wall.
 			switch msg.Type {
 			case tea.KeyEnter:
-				if m.hub != nil {
-					m.hub.post(m.guestName, m.input)
-				}
-				m.input = ""
+				m = m.postGuestbook()
 			case tea.KeyBackspace, tea.KeyDelete:
 				if r := []rune(m.input); len(r) > 0 {
 					m.input = string(r[:len(r)-1])
 				}
+				m.gbNote = ""
 			case tea.KeySpace:
 				if len([]rune(m.input)) < maxGuestLen {
 					m.input += " "
 				}
+				m.gbNote = ""
 			case tea.KeyRunes:
 				if len([]rune(m.input)) < maxGuestLen {
 					m.input += string(msg.Runes)
 				}
+				m.gbNote = ""
 			case tea.KeyEsc:
 				if m.input != "" {
 					m.input = ""
@@ -466,7 +498,11 @@ func (m model) View() string {
 
 func (m model) viewGuestbook() string {
 	out := m.styles.title.Render("Guestbook") + "\n" + m.styles.dim.Render("──────────────") + "\n\n"
-	out += m.styles.name.Render("● ") + m.styles.body.Render(presenceLine(m.presence.count)) + "\n\n"
+	out += m.styles.name.Render("● ") + m.styles.body.Render(presenceLine(m.presence.count))
+	if m.presence.visits > 0 {
+		out += m.styles.dim.Render(fmt.Sprintf("   ·   %d visits all-time", m.presence.visits))
+	}
+	out += "\n\n"
 
 	if len(m.presence.entries) == 0 {
 		out += m.styles.dim.Render("No marks yet — be the first.") + "\n"
@@ -481,6 +517,9 @@ func (m model) viewGuestbook() string {
 	}
 
 	out += "\n" + m.styles.dim.Render("leave a mark ") + m.styles.body.Render("› "+m.input) + m.styles.name.Render("▌") + "\n"
+	if m.gbNote != "" {
+		out += m.styles.dim.Render(m.gbNote) + "\n"
+	}
 	out += "\n" + m.styles.hint.Render("[type · enter to post · esc back]")
 	return "\n" + out
 }
@@ -1054,8 +1093,10 @@ func main() {
 
 	// In-memory files served read-only over scp (vCard, resume, business card).
 	assetFS := buildAssetFS()
-	// Shared live state (presence + guestbook) across all sessions.
-	h := newHub()
+	// Shared live state (presence + guestbook), persisted when $DATA_DIR is set.
+	h := newHub(newStore())
+	// Cap connections per source IP to keep a public, no-auth server civil.
+	connLimiter := newLimiter(connsPerMin, time.Minute)
 
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%s", host, p)),
@@ -1069,7 +1110,8 @@ func main() {
 			teaMiddleware(h),
 			cliMiddleware, // `ssh host <cmd>` and pipes → plaintext
 			scp.Middleware(scp.NewFSReadHandler(assetFS), nil), // `scp host:file .` downloads (read-only)
-			lm.Middleware(), // logging (outermost)
+			rateLimitMiddleware(connLimiter),                   // reject IPs that connect too often
+			lm.Middleware(),                                    // logging (outermost)
 		),
 	)
 	if err != nil {
